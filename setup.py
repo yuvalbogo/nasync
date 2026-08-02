@@ -9,7 +9,6 @@ setup(
     packages=find_packages(),
     install_requires=[
         "click==8.1.7",
-        "smb-protocol==1.10.1",
         "watchdog==3.0.0",
         "appdirs==1.4.4",
     ],

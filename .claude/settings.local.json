@@ -4,7 +4,11 @@
       "Bash(git init *)",
       "Bash(git config *)",
       "Bash(git add *)",
-      "Bash(git commit -m 'Initial project structure and core implementation *)"
+      "Bash(git commit -m 'Initial project structure and core implementation *)",
+      "Bash(pip install *)",
+      "Bash(samba-sync --help)",
+      "Bash(pip index *)",
+      "Bash(git commit -m 'Fix SAMBA client implementation and add environment variable support *)"
     ]
   }
 }

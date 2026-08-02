@@ -36,8 +36,8 @@ class Config:
 
     def get_server_config(self):
         server = self.data.get("server", {})
-        password = ""
-        if self.creds_file.exists():
+        password = os.environ.get("SAMBA_PASSWORD", "")
+        if not password and self.creds_file.exists():
             with open(self.creds_file) as f:
                 password = f.read().strip()
         return {

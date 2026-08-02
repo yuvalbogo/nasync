@@ -108,6 +108,21 @@ Example config structure:
 }
 ```
 
+### Using Environment Variables
+
+For scripted/automated usage, set `SAMBA_PASSWORD`:
+```bash
+export SAMBA_PASSWORD="your_password"
+samba-sync sync
+```
+
+This allows you to create cron jobs or scripts without hardcoding passwords:
+```bash
+#!/bin/bash
+export SAMBA_PASSWORD=$(cat /path/to/secret/file)
+samba-sync sync
+```
+
 ## Commands Reference
 
 | Command | Description |
@@ -130,6 +145,10 @@ Example config structure:
 ## Requirements
 
 - Python 3.8+
+- `samba-client` package (for smbclient tool)
+  - **Ubuntu/Debian**: `sudo apt install samba-client`
+  - **Fedora/RHEL**: `sudo dnf install samba-client`
+  - **macOS**: `brew install samba`
 - SAMBA share accessible on your network
 - Read/write permissions on SAMBA share
 
