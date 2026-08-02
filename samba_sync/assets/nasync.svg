@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="nasync-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3ea0ff"/>
+      <stop offset="1" stop-color="#1565c0"/>
+    </linearGradient>
+    <linearGradient id="nasync-drive" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbe9ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded badge -->
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#nasync-bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#ffffff" opacity="0.06"/>
+
+  <!-- NAS / drive glyph in the centre -->
+  <g>
+    <rect x="86" y="110" width="84" height="52" rx="10" fill="url(#nasync-drive)"/>
+    <rect x="96" y="124" width="46" height="7" rx="3.5" fill="#1565c0" opacity="0.55"/>
+    <rect x="96" y="140" width="46" height="7" rx="3.5" fill="#1565c0" opacity="0.55"/>
+    <circle cx="158" cy="136" r="6" fill="#3ea0ff"/>
+  </g>
+
+  <!-- circular sync arrows wrapping the drive -->
+  <g fill="none" stroke="#ffffff" stroke-width="15" stroke-linecap="round">
+    <path d="M 74 136 A 54 54 0 0 1 150 88"/>
+    <path d="M 182 120 A 54 54 0 0 1 106 168"/>
+  </g>
+  <!-- arrowheads -->
+  <path d="M 150 88 l -3 -22 l 22 8 z" fill="#ffffff"/>
+  <path d="M 106 168 l 3 22 l -22 -8 z" fill="#ffffff"/>
+</svg>

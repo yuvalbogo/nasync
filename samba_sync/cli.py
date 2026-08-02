@@ -265,6 +265,31 @@ def tui():
     run()
 
 
+@main.command(name="install-desktop")
+@click.option("--uninstall", is_flag=True, help="Remove the launcher instead of adding it")
+def install_desktop(uninstall):
+    """Add a desktop launcher + icon to your app menu (Linux)"""
+    from samba_sync import desktop
+    try:
+        if uninstall:
+            removed = desktop.uninstall()
+            if removed:
+                for p in removed:
+                    click.echo(f"🗑️  removed {p}")
+                click.echo("✅ Desktop launcher removed.")
+            else:
+                click.echo("Nothing to remove — no launcher was installed.")
+        else:
+            written = desktop.install()
+            for p in written:
+                click.echo(f"📄 wrote {p}")
+            click.echo("\n✅ Installed! Look for 'nasync' in your application menu.")
+            click.echo("   Clicking it opens 'nasync tui' in a terminal window.")
+    except Exception as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+
+
 @main.command(name="test-connection")
 def test_connection():
     """Check server connectivity, credentials, and share access"""

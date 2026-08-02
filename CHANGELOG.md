@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop launcher** (`nasync install-desktop`): installs a freedesktop
+  `.desktop` entry and an app icon under `~/.local/share` so nasync shows up in
+  the application menu and opens the TUI in a terminal. `--uninstall` removes
+  it. Linux only. Ships an SVG app icon in the package.
 - **Interactive terminal UI** (`nasync tui`, install with `nasync[tui]`): a
   Textual app with a server panel + Test-connection button, auto-populated
   share picker, a sync-pairs table, and Sync/Dry-run/Restore actions that

@@ -52,6 +52,9 @@ Issues = "https://github.com/YuvalBogo/nasync/issues"
 [project.scripts]
 nasync = "samba_sync.cli:main"
 
+[tool.setuptools.package-data]
+samba_sync = ["assets/*.svg"]
+
 [tool.black]
 line-length = 100
 target-version = ["py38"]

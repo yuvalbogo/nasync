@@ -1,11 +1,16 @@
-# SAMBA Sync Auto
+<img src="samba_sync/assets/nasync.svg" width="104" align="right" alt="nasync icon"/>
 
-A lightweight, cross-platform CLI tool for automatic synchronization between your local machine and a SAMBA-based home NAS server. Perfect for simple backup and file sync workflows.
+# nasync
+
+A lightweight, cross-platform tool for syncing your local folders to a
+SAMBA-based home NAS. Use it as a CLI, a full terminal UI (`nasync tui`), or a
+launcher in your desktop app menu. Perfect for simple backup and file sync.
 
 ## Features
 
 - 🔄 **Bidirectional Sync**: Push local changes to server or restore from backup
-- 🎯 **Simple Configuration**: Terminal-based setup with pre-defined directory pairs
+- 🎯 **Simple Configuration**: Guided `nasync setup` with a built-in connection test
+- 🖱️ **Terminal UI**: A full-screen interface (`nasync tui`) — plus a clickable app icon
 - ⚡ **Manual & Automatic Modes**: Sync on demand or auto-watch for file changes
 - 🖥️ **Cross-Platform**: Works on Linux (Fedora, Ubuntu, etc.) and macOS
 - 🔐 **Secure**: Credentials stored locally with restricted permissions
@@ -138,6 +143,24 @@ It's a front-end over the same engine as the CLI:
 Everything it does is also available from the CLI, so scripts and the UI stay
 in sync.
 
+### Launch it like an app (Linux)
+
+Add nasync to your desktop application menu with an icon:
+
+```bash
+nasync install-desktop
+```
+
+Then find **nasync** in your app launcher — clicking it opens the TUI in a
+terminal window. This installs a standard freedesktop `.desktop` entry and an
+icon under `~/.local/share` (nothing system-wide, no root needed). To remove it:
+
+```bash
+nasync install-desktop --uninstall
+```
+
+> On macOS there's no `.desktop` mechanism — launch the UI with `nasync tui`.
+
 ## Configuration
 
 Configuration is stored in:
@@ -200,6 +223,7 @@ nasync sync
 |---------|-------------|
 | `nasync setup` | Guided first-time setup (server + share + pairs) |
 | `nasync tui` | Launch the interactive terminal UI |
+| `nasync install-desktop` | Add/remove a desktop launcher + icon (Linux) |
 | `nasync init` | Initialize server configuration (manual) |
 | `nasync test-connection` | Verify server, credentials, and share access |
 | `nasync add <local> <server>` | Add a sync pair |
