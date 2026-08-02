@@ -24,7 +24,8 @@ pip install -e .
 ### Via pip (when published)
 
 ```bash
-pip install nasync
+pip install nasync           # CLI only
+pip install 'nasync[tui]'    # CLI + interactive terminal UI (nasync tui)
 ```
 
 ## Quick Start
@@ -115,6 +116,28 @@ Remove a sync pair:
 nasync remove Documents
 ```
 
+## Terminal UI (TUI)
+
+Prefer a visual interface? Launch the terminal UI:
+
+```bash
+pip install 'nasync[tui]'   # one-time: pull in Textual
+nasync tui
+```
+
+![nasync terminal UI](screenshots/tui.svg)
+
+It's a front-end over the same engine as the CLI:
+
+- **Server** panel with a **Test connection** button — validates the IP,
+  port, and credentials, and auto-fills the **Share** picker from what the
+  server exposes
+- **Sync pairs** table to add/remove local→server folder mappings
+- **Sync / Dry-run / Restore** buttons, with live progress in the **Log** pane
+
+Everything it does is also available from the CLI, so scripts and the UI stay
+in sync.
+
 ## Configuration
 
 Configuration is stored in:
@@ -176,6 +199,7 @@ nasync sync
 | Command | Description |
 |---------|-------------|
 | `nasync setup` | Guided first-time setup (server + share + pairs) |
+| `nasync tui` | Launch the interactive terminal UI |
 | `nasync init` | Initialize server configuration (manual) |
 | `nasync test-connection` | Verify server, credentials, and share access |
 | `nasync add <local> <server>` | Add a sync pair |

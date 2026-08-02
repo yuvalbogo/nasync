@@ -204,11 +204,13 @@ def sync(pair, dry_run):
 
     syncer = Syncer()
     try:
-        syncer.sync_pair(pair, dry_run=dry_run)
-        click.echo("\n✅ Sync completed!")
+        result = syncer.sync_pair(pair, dry_run=dry_run)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
+    if result["failed"] and not result["ok"]:
+        raise SystemExit(1)
+    click.echo("\n✅ Sync completed!")
 
 
 @main.command()
@@ -227,11 +229,13 @@ def restore(pair, dry_run, yes):
 
     syncer = Syncer()
     try:
-        syncer.restore_pair(pair, dry_run=dry_run)
-        click.echo("\n✅ Restore completed!")
+        result = syncer.restore_pair(pair, dry_run=dry_run)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
+    if result["failed"] and not result["ok"]:
+        raise SystemExit(1)
+    click.echo("\n✅ Restore completed!")
 
 
 @main.command()
@@ -244,6 +248,21 @@ def watch(pair):
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
+
+
+@main.command()
+def tui():
+    """Launch the interactive terminal UI"""
+    try:
+        from samba_sync.tui import run
+    except ImportError:
+        click.echo(
+            "The TUI needs Textual, which isn't installed. Add it with:\n"
+            "  pip install 'nasync[tui]'    (or:  pip install textual )",
+            err=True,
+        )
+        raise SystemExit(1)
+    run()
 
 
 @main.command(name="test-connection")

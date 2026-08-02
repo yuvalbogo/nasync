@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Interactive terminal UI** (`nasync tui`, install with `nasync[tui]`): a
+  Textual app with a server panel + Test-connection button, auto-populated
+  share picker, a sync-pairs table, and Sync/Dry-run/Restore actions that
+  stream progress into a log pane. Runs the same engine as the CLI.
+
 ### Changed
+- **Internal:** `SAMBAClient`/`Syncer` now take an injectable `reporter`
+  callback (defaults to `print`) and `Syncer` returns a `{"ok", "failed"}`
+  summary instead of raising `SystemExit`. This lets non-CLI front-ends (the
+  TUI) drive the same code and capture progress; CLI behaviour is unchanged.
 - **Renamed the command from `samba-sync` to `nasync`** (shorter to type). The
   distribution and config directory are now `nasync` too
   (`~/.config/nasync/`). The internal Python package remains `samba_sync`.

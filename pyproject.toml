@@ -33,10 +33,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tui = [
+    "textual>=0.60",
+]
 dev = [
     "black==23.7.0",
     "flake8==6.0.0",
     "pytest==7.4.0",
+    "textual>=0.60",
 ]
 
 [project.urls]
