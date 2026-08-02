@@ -16,8 +16,8 @@ A lightweight, cross-platform CLI tool for automatic synchronization between you
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/ServerSyncAuto.git
-cd ServerSyncAuto
+git clone https://github.com/YuvalBogo/nasync.git
+cd nasync
 pip install -e .
 ```
 

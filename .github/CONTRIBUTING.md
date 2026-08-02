@@ -5,7 +5,7 @@ Thank you for your interest in contributing! Here's how you can help.
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/yourusername/ServerSyncAuto.git`
+2. Clone your fork: `git clone https://github.com/YuvalBogo/nasync.git`
 3. Create a virtual environment: `python -m venv venv && source venv/bin/activate`
 4. Install in development mode: `pip install -e .`
 5. Install the samba-client system package if you haven't already

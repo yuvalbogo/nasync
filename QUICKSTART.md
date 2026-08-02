@@ -25,13 +25,13 @@ brew install python samba
 ### 2. Install SAMBA Sync Auto
 
 ```bash
-pip install git+https://github.com/yourusername/ServerSyncAuto.git
+pip install git+https://github.com/YuvalBogo/nasync.git
 ```
 
 Or from source:
 ```bash
-git clone https://github.com/yourusername/ServerSyncAuto.git
-cd ServerSyncAuto
+git clone https://github.com/YuvalBogo/nasync.git
+cd nasync
 pip install -e .
 ```
 
@@ -177,8 +177,8 @@ nasync sync
 ## Support
 
 Found an issue? 
-- Check [existing issues](https://github.com/yourusername/ServerSyncAuto/issues)
-- [Create a new issue](https://github.com/yourusername/ServerSyncAuto/issues/new?template=bug_report.md)
+- Check [existing issues](https://github.com/YuvalBogo/nasync/issues)
+- [Create a new issue](https://github.com/YuvalBogo/nasync/issues/new?template=bug_report.md)
 
 Want to contribute?
 - See [CONTRIBUTING.md](.github/CONTRIBUTING.md)
