@@ -29,6 +29,8 @@ pip install samba-sync-auto
 
 ## Quick Start
 
+**⏱️ 5-minute setup guide:** See [QUICKSTART.md](QUICKSTART.md)
+
 ### 1. Initialize Server Configuration
 
 ```bash
