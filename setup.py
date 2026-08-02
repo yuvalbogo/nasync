@@ -12,6 +12,9 @@ setup(
         "watchdog==3.0.0",
         "appdirs==1.4.4",
     ],
+    extras_require={
+        "tui": ["textual>=0.60"],
+    },
     entry_points={
         "console_scripts": [
             "nasync=samba_sync.cli:main",

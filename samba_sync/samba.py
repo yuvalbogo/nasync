@@ -13,13 +13,16 @@ class SAMBAClient:
     """
 
     def __init__(self, ip: str, username: str, password: str, share: str,
-                 port: int = 445):
+                 port: int = 445, reporter=None):
         self.ip = ip
         self.username = username
         self.password = password
         self.share = share
         self.port = int(port)
         self.url = f"//{ip}/{share}"
+        # Progress lines go through this callback; defaults to stdout so the
+        # CLI behaves exactly as before. A TUI/GUI can inject its own sink.
+        self._report = reporter or print
 
     # ------------------------------------------------------------------ #
     # Low-level session runner
@@ -167,15 +170,15 @@ class SAMBAClient:
                 dirs.add(tuple(rel.parts[:depth]))
 
         if dry_run:
-            print(f"  [dry-run] would upload {len(files)} file(s)")
+            self._report(f"  [dry-run] would upload {len(files)} file(s)")
             for _, remote_path in files:
-                print(f"    + {remote_path}")
+                self._report(f"    + {remote_path}")
             for name in skipped:
-                print(f"    ! skipped (unsupported name): {name}")
+                self._report(f"    ! skipped (unsupported name): {name}")
             return {"transferred": len(files), "skipped": len(skipped), "errors": 0}
 
         if not files:
-            print("  (nothing to upload)")
+            self._report("  (nothing to upload)")
             return {"transferred": 0, "skipped": len(skipped), "errors": 0}
 
         commands = ["prompt OFF"]
@@ -205,11 +208,11 @@ class SAMBAClient:
             if "NT_STATUS" in line and "OBJECT_NAME_COLLISION" not in line
         ]
         transferred = len(files) - len(errors)
-        print(f"  Uploaded {transferred}/{len(files)} file(s)")
+        self._report(f"  Uploaded {transferred}/{len(files)} file(s)")
         for name in skipped:
-            print(f"  ! skipped (unsupported name): {name}")
+            self._report(f"  ! skipped (unsupported name): {name}")
         for line in errors:
-            print(f"  ! {line.strip()}")
+            self._report(f"  ! {line.strip()}")
         return {"transferred": transferred, "skipped": len(skipped), "errors": len(errors)}
 
     # ------------------------------------------------------------------ #
@@ -226,7 +229,7 @@ class SAMBAClient:
             fatal = self._fatal_error(output)
             if fatal:
                 raise Exception(fatal)
-            print(f"  [dry-run] would restore from \\{base} into {local_dir}")
+            self._report(f"  [dry-run] would restore from \\{base} into {local_dir}")
             return {"transferred": 0, "skipped": 0, "errors": 0}
 
         os.makedirs(local_dir, exist_ok=True)
@@ -250,7 +253,7 @@ class SAMBAClient:
             line for line in output.splitlines()
             if "NT_STATUS" in line and "NO_SUCH_FILE" not in line
         ]
-        print(f"  Downloaded {transferred} file(s)")
+        self._report(f"  Downloaded {transferred} file(s)")
         for line in errors:
-            print(f"  ! {line.strip()}")
+            self._report(f"  ! {line.strip()}")
         return {"transferred": transferred, "skipped": 0, "errors": len(errors)}

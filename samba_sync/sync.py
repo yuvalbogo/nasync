@@ -3,15 +3,24 @@ from samba_sync.samba import SAMBAClient
 
 
 class Syncer:
-    def __init__(self):
+    """Orchestrates push/pull across configured pairs.
+
+    Output is routed through an injectable ``reporter`` callback (defaults to
+    ``print`` so the CLI is unchanged). Operations *return a summary dict*
+    ``{"ok": int, "failed": int}`` instead of exiting, so any front-end (CLI,
+    TUI, ...) can decide how to react.
+    """
+
+    def __init__(self, reporter=None):
         self.config = Config()
+        self._report = reporter or print
 
     def _prepare(self, pair_name):
         """Validate config and return (client, pairs) ready to transfer."""
         server_config = self.config.get_server_config()
         # Password may legitimately be blank (guest shares); the rest is required.
         if not all(server_config.get(k) for k in ("ip", "username", "share")):
-            raise Exception("Server not configured. Run 'nasync init' first.")
+            raise Exception("Server not configured. Run 'nasync setup' first.")
 
         pairs = self.config.get_pairs()
         if not pairs:
@@ -28,16 +37,17 @@ class Syncer:
             server_config["password"],
             server_config["share"],
             port=server_config.get("port", 445),
+            reporter=self._report,
         )
         return client, pairs
 
-    def sync_pair(self, pair_name: str = None, dry_run: bool = False):
-        self._run(pair_name, direction="push", dry_run=dry_run)
+    def sync_pair(self, pair_name: str = None, dry_run: bool = False) -> dict:
+        return self._run(pair_name, direction="push", dry_run=dry_run)
 
-    def restore_pair(self, pair_name: str = None, dry_run: bool = False):
-        self._run(pair_name, direction="pull", dry_run=dry_run)
+    def restore_pair(self, pair_name: str = None, dry_run: bool = False) -> dict:
+        return self._run(pair_name, direction="pull", dry_run=dry_run)
 
-    def _run(self, pair_name, direction, dry_run):
+    def _run(self, pair_name, direction, dry_run) -> dict:
         client, pairs = self._prepare(pair_name)
         verb, icon = ("Syncing", "📤") if direction == "push" else ("Restoring", "📥")
 
@@ -48,27 +58,26 @@ class Syncer:
             if not dry_run:
                 client.connect()
             for pair in pairs:
-                print(f"\n{icon} {verb}: {pair['name']}")
+                self._report(f"\n{icon} {verb}: {pair['name']}")
                 if direction == "push":
-                    print(f"  Local:  {pair['local']}")
-                    print(f"  Server: {pair['server']}")
+                    self._report(f"  Local:  {pair['local']}")
+                    self._report(f"  Server: {pair['server']}")
                 else:
-                    print(f"  From Server: {pair['server']}")
-                    print(f"  To Local:    {pair['local']}")
+                    self._report(f"  From Server: {pair['server']}")
+                    self._report(f"  To Local:    {pair['local']}")
                 try:
                     client.sync_directory(
                         pair["local"], pair["server"],
                         direction=direction, dry_run=dry_run,
                     )
-                    print(f"✅ {pair['name']} done")
+                    self._report(f"✅ {pair['name']} done")
                     ok += 1
                 except Exception as e:
-                    print(f"❌ Failed on {pair['name']}: {e}")
+                    self._report(f"❌ Failed on {pair['name']}: {e}")
                     failed += 1
         finally:
             client.disconnect()
 
         if failed:
-            print(f"\n⚠️  Completed with {failed} error(s)")
-            if ok == 0:
-                raise SystemExit(1)
+            self._report(f"\n⚠️  Completed with {failed} error(s)")
+        return {"ok": ok, "failed": failed}

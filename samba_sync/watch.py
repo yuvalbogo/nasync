@@ -37,9 +37,9 @@ class SyncEventHandler(FileSystemEventHandler):
     def _fire(self):
         print(f"\n🔄 Changes detected — syncing '{self.pair_name}'...")
         try:
-            self.sync_func(self.pair_name)
-        except SystemExit:
-            print(f"❌ Sync reported errors for '{self.pair_name}'")
+            result = self.sync_func(self.pair_name)
+            if result and result.get("failed"):
+                print(f"⚠️  {result['failed']} error(s) syncing '{self.pair_name}'")
         except Exception as e:
             print(f"❌ Sync failed: {e}")
 
