@@ -1,10 +1,13 @@
-<img src="nasync/assets/nasync_logo.png" width="96" align="right" alt="nasync logo"/>
+<img src="nasync/assets/nasync_logo.png" width="96" align="right" alt="NASync logo"/>
 
-# nasync
+# NASync
+
+### Sync your NAS with class.
 
 A lightweight, cross-platform tool for syncing your local folders to a
-SAMBA-based home NAS. Use it as a CLI, a full terminal UI (`nasync tui`), or a
-launcher in your desktop app menu. Perfect for simple backup and file sync.
+SAMBA-based home NAS. Use it as a CLI (`nasync`), a full terminal UI
+(`nasync tui`), or a launcher in your desktop app menu. Perfect for simple
+backup and file sync.
 
 ## Features
 

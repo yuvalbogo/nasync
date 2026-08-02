@@ -188,8 +188,8 @@ class AddServerScreen(ModalScreen):
 
 
 class NasyncApp(App):
-    TITLE = "nasync"
-    SUB_TITLE = "SAMBA sync for your home NAS"
+    TITLE = "NASync"
+    SUB_TITLE = "Sync your NAS with class"
 
     CSS = """
     Screen { layout: horizontal; background: $background; }
