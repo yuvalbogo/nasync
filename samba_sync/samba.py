@@ -13,7 +13,7 @@ class SAMBAClient:
     """
 
     def __init__(self, ip: str, username: str, password: str, share: str,
-                 port: int = 445, reporter=None):
+                 port: int = 445, reporter=None, progress=None):
         self.ip = ip
         self.username = username
         self.password = password
@@ -23,6 +23,9 @@ class SAMBAClient:
         # Progress lines go through this callback; defaults to stdout so the
         # CLI behaves exactly as before. A TUI/GUI can inject its own sink.
         self._report = reporter or print
+        # Per-file progress callback: progress(done, total, name, verb).
+        # `total` may be None when it isn't known ahead of time (pulls).
+        self._progress = progress or (lambda done, total, name, verb: None)
 
     # ------------------------------------------------------------------ #
     # Low-level session runner
@@ -53,6 +56,39 @@ class SAMBAClient:
         """Feed a list of smbclient commands to a single session over stdin."""
         script = "\n".join(commands) + "\n"
         return self._run_smbclient([self.url], script=script)
+
+    def _stream_session(self, commands: list, on_line) -> tuple:
+        """Run a single smbclient session, invoking on_line(line) as each line
+        of output arrives (so callers can report live progress). Returns
+        (returncode, combined_output)."""
+        script = "\n".join(commands) + "\n"
+        env = os.environ.copy()
+        env["PASSWD"] = self.password
+        try:
+            proc = subprocess.Popen(
+                ["smbclient", self.url, "-U", self.username, "-p", str(self.port)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
+        except FileNotFoundError:
+            raise Exception(
+                "smbclient not found. Install samba-client:\n"
+                "  Ubuntu/Debian: sudo apt install smbclient\n"
+                "  Fedora/RHEL:   sudo dnf install samba-client\n"
+                "  macOS:         brew install samba"
+            )
+        collected = []
+        proc.stdin.write(script)
+        proc.stdin.close()
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            collected.append(line)
+            on_line(line)
+        proc.wait()
+        return proc.returncode, "\n".join(collected)
 
     def list_shares(self) -> list:
         """Return the names of disk shares the server exposes (best effort)."""
@@ -196,8 +232,18 @@ class SAMBAClient:
             commands.append(f'put "{local_path}" "{remote_path}"')
         commands.append("quit")
 
-        result = self._run_session(commands)
-        output = self._combined_output(result)
+        total = len(files)
+        done = 0
+
+        def on_line(line):
+            nonlocal done
+            # smbclient prints "putting file <local> as <remote> (speed)" per file
+            if line.startswith("putting file"):
+                done += 1
+                name = line[len("putting file"):].strip().split(" as ")[0].strip()
+                self._progress(done, total, os.path.basename(name), "Uploading")
+
+        returncode, output = self._stream_session(commands, on_line)
         fatal = self._fatal_error(output)
         if fatal:
             raise Exception(fatal)
@@ -241,14 +287,23 @@ class SAMBAClient:
             "mget *",
             "quit",
         ]
-        result = self._run_session(commands)
-        output = self._combined_output(result)
+
+        done = 0
+
+        def on_line(line):
+            nonlocal done
+            # smbclient prints "getting file \path\name of size N as localname (...)"
+            if line.startswith("getting file"):
+                done += 1
+                name = line.split(" as ", 1)[-1].split(" (")[0].strip()
+                self._progress(done, None, os.path.basename(name), "Downloading")
+
+        returncode, output = self._stream_session(commands, on_line)
         fatal = self._fatal_error(output)
         if fatal:
             raise Exception(fatal)
 
-        # smbclient prints "getting file \path\name of size N as localname"
-        transferred = sum(1 for line in output.splitlines() if line.startswith("getting file"))
+        transferred = done
         errors = [
             line for line in output.splitlines()
             if "NT_STATUS" in line and "NO_SUCH_FILE" not in line

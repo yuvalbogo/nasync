@@ -11,9 +11,10 @@ class Syncer:
     TUI, ...) can decide how to react.
     """
 
-    def __init__(self, reporter=None):
+    def __init__(self, reporter=None, progress=None):
         self.config = Config()
         self._report = reporter or print
+        self._progress = progress
 
     def _prepare(self, pair_name):
         """Validate config and return (client, pairs) ready to transfer."""
@@ -38,6 +39,7 @@ class Syncer:
             server_config["share"],
             port=server_config.get("port", 445),
             reporter=self._report,
+            progress=self._progress,
         )
         return client, pairs
 

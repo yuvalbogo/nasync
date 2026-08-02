@@ -11,7 +11,8 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input, Label, RichLog, Select, Static,
+    Button, DataTable, Footer, Header, Input, Label, ProgressBar, RichLog,
+    Select, Static,
 )
 
 from samba_sync.config import Config
@@ -57,60 +58,90 @@ class NasyncApp(App):
     SUB_TITLE = "SAMBA sync for your home NAS"
 
     CSS = """
-    Screen { layout: horizontal; }
-    #left { width: 55%; padding: 1 2; }
-    #right { width: 45%; padding: 1 2; }
-    .title { text-style: bold; }
-    .section { border: round $primary; padding: 0 1; margin-bottom: 1; height: auto; }
+    Screen { layout: horizontal; background: $background; }
+
+    #left  { width: 55%; padding: 1 1 1 2; }
+    #right { width: 45%; padding: 1 2 1 1; }
+
+    .section {
+        border: round $primary 60%;
+        border-title-color: $accent;
+        border-title-style: bold;
+        background: $panel;
+        padding: 1 2;
+        margin-bottom: 1;
+        height: auto;
+    }
+    #log-section { height: 1fr; }
+
     .row { height: auto; }
-    Input { width: 1fr; }
-    #status { margin-top: 1; }
-    #pairs { height: 8; }
-    #log { border: round $secondary; height: 1fr; }
-    .buttons { height: auto; align: left middle; }
-    Button { margin: 1 1 0 0; }
-    #dialog { background: $surface; border: thick $primary; padding: 1 2; width: 60; height: auto; }
+    Input { width: 1fr; margin-bottom: 1; }
+    #status { margin: 1 0; }
+    #pairs { height: 7; margin-bottom: 1; }
+
+    .buttons { height: auto; align: left middle; margin-top: 1; }
+    Button { margin: 0 1 0 0; border: none; height: 3; min-width: 12; }
+
+    /* progress */
+    #current { color: $text-muted; height: 1; margin-top: 1; }
+    #bar { margin-top: 1; width: 1fr; }
+
+    #log { height: 1fr; background: $surface; }
+
+    #dialog {
+        background: $surface;
+        border: round $primary;
+        border-title-color: $accent;
+        border-title-style: bold;
+        padding: 1 2;
+        width: 62;
+        height: auto;
+    }
     """
 
     BINDINGS = [
+        ("s", "sync", "Sync"),
+        ("d", "dryrun", "Dry-run"),
+        ("t", "test", "Test"),
         ("q", "quit", "Quit"),
-        ("s", "save", "Save server"),
-        ("t", "test", "Test connection"),
     ]
 
+    def _section(self, title: str, *, id: str = None) -> Vertical:
+        box = Vertical(classes="section", id=id) if id else Vertical(classes="section")
+        box.border_title = title
+        return box
+
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Header(show_clock=True)
         with VerticalScroll(id="left"):
-            with Vertical(classes="section"):
-                yield Label("Server", classes="title")
+            with self._section("Server"):
                 yield Input(placeholder="Server IP (e.g. 192.168.1.100)", id="ip")
                 with Horizontal(classes="row"):
                     yield Input(placeholder="Port (445)", id="port")
                     yield Input(placeholder="Username", id="user")
                 yield Input(placeholder="Password (blank for guest)", password=True, id="password")
+                yield Select([], prompt="Share — test the connection to load", id="share")
                 with Horizontal(classes="buttons"):
                     yield Button("Test connection", variant="primary", id="btn-test")
-                    yield Button("Save server", id="btn-save")
+                    yield Button("Save", id="btn-save")
                 yield Label("Not tested yet.", id="status")
-                yield Label("Share")
-                yield Select([], prompt="Test the connection to load shares", id="share")
 
-            with Vertical(classes="section"):
-                yield Label("Sync pairs", classes="title")
+            with self._section("Sync pairs"):
                 yield DataTable(id="pairs")
                 with Horizontal(classes="buttons"):
                     yield Button("Add pair", variant="success", id="btn-add")
-                    yield Button("Remove selected", variant="error", id="btn-remove")
+                    yield Button("Remove", variant="error", id="btn-remove")
 
-            with Vertical(classes="section"):
-                yield Label("Actions", classes="title")
+        with Vertical(id="right"):
+            with self._section("Actions"):
                 with Horizontal(classes="buttons"):
                     yield Button("Sync ▶", variant="primary", id="btn-sync")
                     yield Button("Dry-run", id="btn-dryrun")
                     yield Button("Restore ◀", variant="warning", id="btn-restore")
-        with Vertical(id="right"):
-            yield Label("Log", classes="title")
-            yield RichLog(id="log", markup=True, wrap=True)
+                yield Label("", id="current")
+                yield ProgressBar(id="bar", total=100, show_eta=False)
+            with self._section("Log", id="log-section"):
+                yield RichLog(id="log", markup=True, wrap=True)
         yield Footer()
 
     # ------------------------------------------------------------------ #
@@ -170,12 +201,33 @@ class NasyncApp(App):
 
     def _current_share(self):
         value = self.query_one("#share", Select).value
-        return value if value != Select.BLANK else None
+        # Share names are strings; anything else (blank sentinel) means "none".
+        return value if isinstance(value, str) and value else None
 
     def _set_status(self, text: str, ok: bool = None) -> None:
         colour = "" if ok is None else ("green" if ok else "red")
         label = self.query_one("#status", Label)
         label.update(f"[{colour}]{text}[/{colour}]" if colour else text)
+
+    # ------------------------------------------------------------------ #
+    # Progress (dnf-style bar + current action)
+    # ------------------------------------------------------------------ #
+    def _reset_progress(self) -> None:
+        self.query_one("#bar", ProgressBar).update(total=100, progress=0)
+        self.query_one("#current", Label).update("")
+
+    def _on_progress(self, done: int, total, name: str, verb: str) -> None:
+        bar = self.query_one("#bar", ProgressBar)
+        if total:
+            bar.update(total=total, progress=done)
+        else:
+            bar.update(total=None, progress=done)  # indeterminate (unknown total)
+        counter = f"{done}/{total}" if total else str(done)
+        self.query_one("#current", Label).update(f"{verb} [b]{name}[/b]  ({counter})")
+
+    def _thread_progress(self, done, total, name, verb) -> None:
+        """Progress callback for worker threads; marshals to the UI thread."""
+        self.call_from_thread(self._on_progress, done, total, name, verb)
 
     # ------------------------------------------------------------------ #
     # Button routing
@@ -271,6 +323,12 @@ class NasyncApp(App):
     # ------------------------------------------------------------------ #
     # Transfers
     # ------------------------------------------------------------------ #
+    def action_sync(self) -> None:
+        self._start_transfer("push", dry_run=False)
+
+    def action_dryrun(self) -> None:
+        self._start_transfer("push", dry_run=True)
+
     def _start_transfer(self, direction: str, dry_run: bool) -> None:
         # Persist current server fields so what runs matches what's on screen.
         if not dry_run:
@@ -279,13 +337,14 @@ class NasyncApp(App):
             if fields["ip"] and fields["username"] and share:
                 self.config.set_server(fields["ip"], fields["username"],
                                        fields["password"], share, fields["port"])
+        self._reset_progress()
         verb = {"push": "Sync", "pull": "Restore"}[direction]
         self._log(f"\n[b]▶ {verb}{' (dry-run)' if dry_run else ''}…[/b]")
         self._worker_transfer(direction, dry_run)
 
     @work(thread=True, exclusive=True)
     def _worker_transfer(self, direction: str, dry_run: bool) -> None:
-        syncer = Syncer(reporter=self._thread_log)
+        syncer = Syncer(reporter=self._thread_log, progress=self._thread_progress)
         try:
             if direction == "push":
                 result = syncer.sync_pair(dry_run=dry_run)
@@ -296,6 +355,7 @@ class NasyncApp(App):
             return
         summary = f"[green]Done[/green] — {result['ok']} ok, {result['failed']} failed"
         self.call_from_thread(self._log, summary)
+        self.call_from_thread(lambda: self.query_one("#current", Label).update(""))
 
 
 def run() -> None:

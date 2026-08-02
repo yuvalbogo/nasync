@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **TUI: live per-file progress.** Push/pull now stream `smbclient` output and
+  emit a per-file progress callback, so the TUI shows a dnf-style progress bar
+  with an `X/total` counter and the current file name.
+- **TUI: refined layout.** Section titles are embedded in rounded borders with
+  consistent padding/spacing, and the **Actions** panel moved to the right
+  column, directly above the **Log**.
+
 ### Added
 - **Desktop launcher** (`nasync install-desktop`): installs a freedesktop
   `.desktop` entry and an app icon under `~/.local/share` so nasync shows up in

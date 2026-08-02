@@ -15,8 +15,9 @@ class _FakeSMB:
 
 
 class _FakeSyncer:
-    def __init__(self, reporter=None):
+    def __init__(self, reporter=None, progress=None):
         self._r = reporter or print
+        self._progress = progress
 
     def sync_pair(self, pair_name=None, dry_run=False):
         self._r("  pushing…")
