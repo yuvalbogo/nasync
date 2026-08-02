@@ -161,9 +161,9 @@ def add(local_path, server_path, name):
         click.echo(f"⚠️  Note: local path does not exist yet: {local_path}")
 
 
-@main.command()
+@main.command(name="list")
 @click.option("--pair", default=None, help="Specific pair name to list")
-def list(pair):
+def list_pairs(pair):
     """List all configured sync pairs"""
     config = Config()
     pairs = config.get_pairs()
