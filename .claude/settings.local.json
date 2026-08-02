@@ -12,7 +12,8 @@
       "Bash(python *)",
       "Bash(samba-sync status *)",
       "Bash(git commit -m 'Add enhanced CLI features and error handling *)",
-      "Bash(git commit -m 'Add development tools and pyproject.toml configuration *)"
+      "Bash(git commit -m 'Add development tools and pyproject.toml configuration *)",
+      "Bash(git commit -m 'Add GitHub Actions CI/CD workflows and PR templates *)"
     ]
   }
 }
