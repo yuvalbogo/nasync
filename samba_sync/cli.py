@@ -1,12 +1,13 @@
 import click
 from getpass import getpass
+from samba_sync import __version__
 from samba_sync.config import Config
 from samba_sync.sync import Syncer
 from samba_sync.watch import Watcher
 
 
 @click.group()
-@click.version_option()
+@click.version_option(version=__version__, prog_name="samba-sync")
 def main():
     """SAMBA Sync Auto - Automatic sync tool for SAMBA home NAS backup"""
     pass
