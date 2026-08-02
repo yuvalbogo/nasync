@@ -3,7 +3,7 @@ requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "samba-sync-auto"
+name = "nasync"
 version = "0.1.0"
 description = "Automatic SAMBA-based sync tool for home NAS backup"
 readme = "README.md"
@@ -46,7 +46,7 @@ Repository = "https://github.com/yourusername/ServerSyncAuto.git"
 Issues = "https://github.com/yourusername/ServerSyncAuto/issues"
 
 [project.scripts]
-samba-sync = "samba_sync.cli:main"
+nasync = "samba_sync.cli:main"
 
 [tool.black]
 line-length = 100

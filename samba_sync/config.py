@@ -6,7 +6,7 @@ import appdirs
 
 class Config:
     def __init__(self):
-        self.config_dir = Path(appdirs.user_config_dir("samba-sync"))
+        self.config_dir = Path(appdirs.user_config_dir("nasync"))
         self.config_file = self.config_dir / "config.json"
         self.creds_file = self.config_dir / ".creds"
         self.config_dir.mkdir(parents=True, exist_ok=True)

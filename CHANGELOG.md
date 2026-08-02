@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Renamed the command from `samba-sync` to `nasync`** (shorter to type). The
+  distribution and config directory are now `nasync` too
+  (`~/.config/nasync/`). The internal Python package remains `samba_sync`.
+
 ### Added
 - `test-connection` command: verifies the server is reachable, credentials are
   accepted, and the configured share exists — and lists available shares when

@@ -11,11 +11,11 @@ class Syncer:
         server_config = self.config.get_server_config()
         # Password may legitimately be blank (guest shares); the rest is required.
         if not all(server_config.get(k) for k in ("ip", "username", "share")):
-            raise Exception("Server not configured. Run 'samba-sync init' first.")
+            raise Exception("Server not configured. Run 'nasync init' first.")
 
         pairs = self.config.get_pairs()
         if not pairs:
-            raise Exception("No sync pairs configured. Run 'samba-sync add' first.")
+            raise Exception("No sync pairs configured. Run 'nasync add' first.")
 
         if pair_name:
             pairs = [p for p in pairs if p["name"] == pair_name]

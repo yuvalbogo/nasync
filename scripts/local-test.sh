@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# local-test.sh — end-to-end test of samba-sync against a throwaway Samba
+# local-test.sh — end-to-end test of nasync against a throwaway Samba
 # server running locally in a container. No real NAS and no root required.
 #
 # It will:
 #   1. start a local Samba server (podman or docker) on a high port
-#   2. configure samba-sync in an ISOLATED config dir (your real config is
+#   2. configure nasync in an ISOLATED config dir (your real config is
 #      never touched)
 #   3. push a small tree (incl. hidden + nested files) and verify it landed
 #   4. restore it into an empty dir and verify the files come back
@@ -26,8 +26,8 @@ USER_PASS=testpass
 SHARE=backup                 # SMB share name (maps to /share in the container)
 SERVER_SUBDIR=/mydata        # path under the share to sync into
 
-WORKDIR="$(mktemp -d /tmp/samba-sync-test.XXXXXX)"
-export XDG_CONFIG_HOME="$WORKDIR/config"      # isolate samba-sync config here
+WORKDIR="$(mktemp -d /tmp/nasync-test.XXXXXX)"
+export XDG_CONFIG_HOME="$WORKDIR/config"      # isolate nasync config here
 SRC="$WORKDIR/src"
 RESTORE="$WORKDIR/src"                          # restore back into the same path
 
@@ -56,7 +56,7 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- 0. sanity ------------------------------------------------------------
-command -v samba-sync >/dev/null 2>&1 || die "samba-sync not on PATH — run 'pip install -e .' first."
+command -v nasync >/dev/null 2>&1 || die "nasync not on PATH — run 'pip install -e .' first."
 command -v smbclient  >/dev/null 2>&1 || die "smbclient not installed."
 
 # ---- 1. start the Samba server -------------------------------------------
@@ -80,8 +80,8 @@ done
 [ "$ready" = "1" ] || die "Samba server did not become ready in time."
 ok "server is up"
 
-# ---- 2. configure samba-sync (isolated) ----------------------------------
-say "Configuring samba-sync (isolated config at $XDG_CONFIG_HOME)"
+# ---- 2. configure nasync (isolated) ----------------------------------
+say "Configuring nasync (isolated config at $XDG_CONFIG_HOME)"
 # Configure via the same API 'init' uses, so no interactive prompts are needed.
 python - "$PORT" "$USER_NAME" "$USER_PASS" "$SHARE" "$SRC" "$SERVER_SUBDIR" <<'PY'
 import sys
@@ -92,7 +92,7 @@ c.set_server("127.0.0.1", user, pw, share, int(port))
 c.add_pair(src, subdir, "test")
 print("  configured server 127.0.0.1:%s share=%s pair=test" % (port, share))
 PY
-samba-sync status
+nasync status
 ok "configured"
 
 # ---- 3. push and verify ---------------------------------------------------
@@ -102,7 +102,7 @@ echo "top level" > "$SRC/root.txt"
 echo "nested"    > "$SRC/nested/deep.txt"
 echo "hidden"    > "$SRC/.dotfile"
 
-samba-sync sync --pair test
+nasync sync --pair test
 
 say "Verifying files landed on the server"
 remote_list="$($ENGINE exec "$CONTAINER" find "/share$SERVER_SUBDIR" -type f 2>/dev/null | sort)"
@@ -116,7 +116,7 @@ done
 # ---- 4. restore and verify ------------------------------------------------
 say "Wiping local copy and restoring from server"
 rm -rf "$SRC"/* "$SRC"/.dotfile 2>/dev/null || true
-samba-sync restore --pair test --yes
+nasync restore --pair test --yes
 
 say "Verifying restored files"
 for f in root.txt nested/deep.txt .dotfile; do
@@ -125,6 +125,6 @@ done
 
 # ---- 5. dry-run check -----------------------------------------------------
 say "Checking dry-run makes no changes"
-samba-sync sync --pair test --dry-run >/dev/null && ok "dry-run ran clean"
+nasync sync --pair test --dry-run >/dev/null && ok "dry-run ran clean"
 
 say "ALL CHECKS PASSED 🎉"

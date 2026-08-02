@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="samba-sync-auto",
+    name="nasync",
     version="0.1.0",
     description="Automatic SAMBA-based sync tool for home NAS backup",
     author="Yuval Bogo",
@@ -14,7 +14,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "samba-sync=samba_sync.cli:main",
+            "nasync=samba_sync.cli:main",
         ],
     },
     python_requires=">=3.8",

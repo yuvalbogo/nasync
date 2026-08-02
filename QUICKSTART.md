@@ -40,7 +40,7 @@ pip install -e .
 ### 1. Initialize your server
 
 ```bash
-samba-sync init
+nasync init
 ```
 
 You'll be prompted for:
@@ -52,9 +52,9 @@ You'll be prompted for:
 ### 2. Add directories to sync
 
 ```bash
-samba-sync add ~/Documents /docs
-samba-sync add ~/Downloads /downloads
-samba-sync add ~/Projects /code
+nasync add ~/Documents /docs
+nasync add ~/Downloads /downloads
+nasync add ~/Projects /code
 ```
 
 > The second argument is relative to the **share root** — don't repeat the
@@ -63,7 +63,7 @@ samba-sync add ~/Projects /code
 ### 3. View your configuration
 
 ```bash
-samba-sync status
+nasync status
 ```
 
 Should output:
@@ -85,36 +85,36 @@ Should output:
 
 Sync everything once:
 ```bash
-samba-sync sync
+nasync sync
 ```
 
 Sync only one directory:
 ```bash
-samba-sync sync --pair Documents
+nasync sync --pair Documents
 ```
 
 ### Automatic Watching
 
 Watch and auto-sync on changes:
 ```bash
-samba-sync watch
+nasync watch
 ```
 
 To watch just one pair:
 ```bash
-samba-sync watch --pair Documents
+nasync watch --pair Documents
 ```
 
 ### Restore from Backup
 
 Restore everything from server:
 ```bash
-samba-sync restore
+nasync restore
 ```
 
 Restore one directory:
 ```bash
-samba-sync restore --pair Documents
+nasync restore --pair Documents
 ```
 
 ### Schedule with Cron
@@ -132,7 +132,7 @@ crontab -e
 
 Add this line:
 ```bash
-0 2 * * * export SAMBA_PASSWORD=$(cat ~/.samba-password) && /usr/local/bin/samba-sync sync
+0 2 * * * export SAMBA_PASSWORD=$(cat ~/.samba-password) && /usr/local/bin/nasync sync
 ```
 
 ## Troubleshooting
@@ -147,13 +147,13 @@ Install samba-client for your system (see Installation step 1)
 
 ### "Authentication failed"
 - Verify username and password
-- Run `samba-sync init` again to update credentials
+- Run `nasync init` again to update credentials
 
 ### Credentials not working after init
 Try using environment variable:
 ```bash
 export SAMBA_PASSWORD="your_password"
-samba-sync sync
+nasync sync
 ```
 
 ## Next Steps

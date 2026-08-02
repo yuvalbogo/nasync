@@ -16,7 +16,7 @@ A clear and concise description of what the bug is.
 - SAMBA server type: (if known)
 
 **Steps to reproduce**
-1. Run `samba-sync ...`
+1. Run `nasync ...`
 2. ...
 
 **Expected behavior**

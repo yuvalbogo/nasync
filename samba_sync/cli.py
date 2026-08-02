@@ -8,7 +8,7 @@ from samba_sync.watch import Watcher
 
 
 @click.group()
-@click.version_option(version=__version__, prog_name="samba-sync")
+@click.version_option(version=__version__, prog_name="nasync")
 def main():
     """SAMBA Sync Auto - Automatic sync tool for SAMBA home NAS backup"""
     pass
@@ -138,7 +138,7 @@ def test_connection():
     config = Config()
     sc = config.get_server_config()
     if not all(sc.get(k) for k in ("ip", "username", "share")):
-        click.echo("❌ Server not configured. Run 'samba-sync init' first.", err=True)
+        click.echo("❌ Server not configured. Run 'nasync init' first.", err=True)
         raise SystemExit(1)
 
     client = SAMBAClient(sc["ip"], sc["username"], sc["password"],
@@ -164,7 +164,7 @@ def test_connection():
             if sc["share"] not in shares:
                 click.echo(
                     f"  ⚠️  Configured share '{sc['share']}' is not in that list — "
-                    f"re-run 'samba-sync init' with one of the names above."
+                    f"re-run 'nasync init' with one of the names above."
                 )
     except Exception:
         pass  # listing is best-effort; the connect() result is what matters
@@ -182,7 +182,7 @@ def status():
     pairs = config.get_pairs()
 
     if not server_config["ip"]:
-        click.echo("❌ Server not configured. Run 'samba-sync init' first.")
+        click.echo("❌ Server not configured. Run 'nasync init' first.")
         raise SystemExit(1)
 
     click.echo(f"\n📊 SAMBA Sync Status")

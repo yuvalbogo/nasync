@@ -24,7 +24,7 @@ pip install -e .
 ### Via pip (when published)
 
 ```bash
-pip install samba-sync-auto
+pip install nasync
 ```
 
 ## Quick Start
@@ -34,7 +34,7 @@ pip install samba-sync-auto
 ### 1. Initialize Server Configuration
 
 ```bash
-samba-sync init
+nasync init
 ```
 
 You'll be prompted for:
@@ -47,7 +47,7 @@ You'll be prompted for:
 Then confirm it all works before going further:
 
 ```bash
-samba-sync test-connection
+nasync test-connection
 ```
 
 This checks the server is reachable, your credentials are accepted, and the
@@ -59,9 +59,9 @@ available so you can fix it.
 Add directories to sync. Local and server paths can have different names:
 
 ```bash
-samba-sync add ~/Documents /docs
-samba-sync add ~/Downloads /downloads
-samba-sync add ~/Projects /work
+nasync add ~/Documents /docs
+nasync add ~/Downloads /downloads
+nasync add ~/Projects /work
 ```
 
 > **The server path is relative to the share root — do _not_ repeat the share
@@ -72,41 +72,41 @@ samba-sync add ~/Projects /work
 ### 3. List Your Configuration
 
 ```bash
-samba-sync list
+nasync list
 ```
 
 ### 4. Sync
 
 **Push to server** (manual):
 ```bash
-samba-sync sync
-samba-sync sync --pair Documents  # specific pair
+nasync sync
+nasync sync --pair Documents  # specific pair
 ```
 
 **Restore from server** (manual):
 ```bash
-samba-sync restore
-samba-sync restore --pair Documents
+nasync restore
+nasync restore --pair Documents
 ```
 
 **Auto-sync on file changes** (daemon):
 ```bash
-samba-sync watch
-samba-sync watch --pair Documents  # watch single pair
+nasync watch
+nasync watch --pair Documents  # watch single pair
 ```
 
 ### 5. Manage Pairs
 
 Remove a sync pair:
 ```bash
-samba-sync remove Documents
+nasync remove Documents
 ```
 
 ## Configuration
 
 Configuration is stored in:
-- **Linux/macOS**: `~/.config/samba-sync/config.json`
-- **Credentials**: `~/.config/samba-sync/.creds` (mode 0600)
+- **Linux/macOS**: `~/.config/nasync/config.json`
+- **Credentials**: `~/.config/nasync/.creds` (mode 0600)
 
 Example config structure:
 ```json
@@ -140,7 +140,7 @@ With share `backup` mounted at, say, `/srv/samba/backup` on the server:
 | `backup` | `/photos/2024`     | `backup/photos/2024`            |
 | `backup` | `/backup/docs` ⚠️   | `backup/backup/docs` (double-nested — usually a mistake) |
 
-So the share name comes from `samba-sync init`; the `server` path in each pair
+So the share name comes from `nasync init`; the `server` path in each pair
 is just where *inside* that share the files should go.
 
 ### Using Environment Variables
@@ -148,28 +148,28 @@ is just where *inside* that share the files should go.
 For scripted/automated usage, set `SAMBA_PASSWORD`:
 ```bash
 export SAMBA_PASSWORD="your_password"
-samba-sync sync
+nasync sync
 ```
 
 This allows you to create cron jobs or scripts without hardcoding passwords:
 ```bash
 #!/bin/bash
 export SAMBA_PASSWORD=$(cat /path/to/secret/file)
-samba-sync sync
+nasync sync
 ```
 
 ## Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `samba-sync init` | Initialize server configuration |
-| `samba-sync test-connection` | Verify server, credentials, and share access |
-| `samba-sync add <local> <server>` | Add a sync pair |
-| `samba-sync list` | Show all sync pairs |
-| `samba-sync remove <name>` | Remove a sync pair |
-| `samba-sync sync [--pair NAME]` | Manual sync to server |
-| `samba-sync restore [--pair NAME]` | Restore from server |
-| `samba-sync watch [--pair NAME]` | Auto-sync on file changes |
+| `nasync init` | Initialize server configuration |
+| `nasync test-connection` | Verify server, credentials, and share access |
+| `nasync add <local> <server>` | Add a sync pair |
+| `nasync list` | Show all sync pairs |
+| `nasync remove <name>` | Remove a sync pair |
+| `nasync sync [--pair NAME]` | Manual sync to server |
+| `nasync restore [--pair NAME]` | Restore from server |
+| `nasync watch [--pair NAME]` | Auto-sync on file changes |
 
 ## How It Works
 
@@ -222,7 +222,7 @@ MIT License
 Schedule automatic daily sync at 2 AM:
 
 ```bash
-0 2 * * * export SAMBA_PASSWORD=$(cat ~/.samba-pass) && samba-sync sync
+0 2 * * * export SAMBA_PASSWORD=$(cat ~/.samba-pass) && nasync sync
 ```
 
 ### Watch and Sync in Background
@@ -230,10 +230,10 @@ Schedule automatic daily sync at 2 AM:
 Run as daemon to sync on file changes:
 
 ```bash
-samba-sync watch &
+nasync watch &
 ```
 
-Or in systemd user service (`~/.config/systemd/user/samba-sync.service`):
+Or in systemd user service (`~/.config/systemd/user/nasync.service`):
 
 ```ini
 [Unit]
@@ -242,7 +242,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/samba-sync watch
+ExecStart=/usr/local/bin/nasync watch
 Restart=always
 RestartSec=10
 
@@ -252,8 +252,8 @@ WantedBy=default.target
 
 Enable and start:
 ```bash
-systemctl --user enable samba-sync
-systemctl --user start samba-sync
+systemctl --user enable nasync
+systemctl --user start nasync
 ```
 
 ### Multi-Directory Sync
@@ -262,13 +262,13 @@ Sync different directories on different schedules:
 
 ```bash
 # Sync everything at once
-samba-sync sync
+nasync sync
 
 # Sync only Documents (faster for quick backups)
-samba-sync sync --pair Documents
+nasync sync --pair Documents
 
 # Restore only Downloads if needed
-samba-sync restore --pair Downloads
+nasync restore --pair Downloads
 ```
 
 ## Acknowledgments

@@ -58,7 +58,7 @@ class Watcher:
     def watch_pairs(self, pair_name: str = None):
         pairs = self.syncer.config.get_pairs()
         if not pairs:
-            raise Exception("No sync pairs configured. Run 'samba-sync add' first.")
+            raise Exception("No sync pairs configured. Run 'nasync add' first.")
 
         if pair_name:
             pairs = [p for p in pairs if p["name"] == pair_name]
