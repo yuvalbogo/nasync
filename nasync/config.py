@@ -173,6 +173,29 @@ class Config:
         }
 
     # ------------------------------------------------------------------ #
+    # Automation
+    # ------------------------------------------------------------------ #
+    def get_automation(self) -> dict:
+        a = self.data.get("automation", {})
+        return {
+            "enabled": a.get("enabled", False),
+            "on_change": a.get("on_change", True),
+            "interval_minutes": int(a.get("interval_minutes", 0)),
+        }
+
+    def set_automation(self, enabled=None, on_change=None, interval_minutes=None) -> dict:
+        a = self.get_automation()
+        if enabled is not None:
+            a["enabled"] = bool(enabled)
+        if on_change is not None:
+            a["on_change"] = bool(on_change)
+        if interval_minutes is not None:
+            a["interval_minutes"] = int(interval_minutes)
+        self.data["automation"] = a
+        self.save()
+        return a
+
+    # ------------------------------------------------------------------ #
     # Sync pairs (global — target the active server)
     # ------------------------------------------------------------------ #
     def add_pair(self, local_path: str, server_path: str, name: str = None):

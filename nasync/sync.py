@@ -43,13 +43,14 @@ class Syncer:
         )
         return client, pairs
 
-    def sync_pair(self, pair_name: str = None, dry_run: bool = False) -> dict:
-        return self._run(pair_name, direction="push", dry_run=dry_run)
+    def sync_pair(self, pair_name: str = None, dry_run: bool = False,
+                  mirror: bool = True) -> dict:
+        return self._run(pair_name, direction="push", dry_run=dry_run, mirror=mirror)
 
     def restore_pair(self, pair_name: str = None, dry_run: bool = False) -> dict:
-        return self._run(pair_name, direction="pull", dry_run=dry_run)
+        return self._run(pair_name, direction="pull", dry_run=dry_run, mirror=True)
 
-    def _run(self, pair_name, direction, dry_run) -> dict:
+    def _run(self, pair_name, direction, dry_run, mirror=True) -> dict:
         client, pairs = self._prepare(pair_name)
         verb, icon = ("Syncing", "📤") if direction == "push" else ("Restoring", "📥")
 
@@ -70,7 +71,7 @@ class Syncer:
                 try:
                     client.sync_directory(
                         pair["local"], pair["server"],
-                        direction=direction, dry_run=dry_run,
+                        direction=direction, dry_run=dry_run, mirror=mirror,
                     )
                     self._report(f"✅ {pair['name']} done")
                     ok += 1

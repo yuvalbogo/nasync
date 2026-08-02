@@ -202,14 +202,21 @@ def remove(name):
 @main.command()
 @click.option("--pair", default=None, help="Specific pair name to sync")
 @click.option("--dry-run", is_flag=True, help="Show what would be synced without doing it")
-def sync(pair, dry_run):
-    """Manually sync local directories to server"""
+@click.option("--no-delete", is_flag=True,
+              help="Don't remove server files that were deleted locally (no mirror)")
+def sync(pair, dry_run, no_delete):
+    """Sync local directories to the server (incremental mirror)
+
+    Only new or changed files are uploaded; unchanged files are skipped, and
+    files removed locally are deleted on the server. Use --no-delete to keep
+    server-only files.
+    """
     if dry_run:
         click.echo("🔍 Dry-run mode (no files will be transferred)")
 
     syncer = Syncer()
     try:
-        result = syncer.sync_pair(pair, dry_run=dry_run)
+        result = syncer.sync_pair(pair, dry_run=dry_run, mirror=not no_delete)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
@@ -244,9 +251,43 @@ def restore(pair, dry_run, yes):
 
 
 @main.command()
+@click.option("--interval", type=int, default=None,
+              help="Also sync every N minutes (0 turns the interval off)")
+@click.option("--on-change/--no-on-change", "on_change", default=None,
+              help="Sync when watched files change (default on)")
+@click.option("--status", is_flag=True, help="Show automation settings and exit")
+def auto(interval, on_change, status):
+    """Keep folders synced automatically (watch on-change and/or on an interval)
+
+    Runs until Ctrl+C. Options are remembered, so a later plain `nasync auto`
+    reuses them. Good as a systemd/user service — see the README.
+    """
+    config = Config()
+    a = config.get_automation()
+    if interval is not None:
+        a = config.set_automation(interval_minutes=interval)
+    if on_change is not None:
+        a = config.set_automation(on_change=on_change)
+
+    if status:
+        click.echo(f"Automation: on-change={a['on_change']}, "
+                   f"interval={a['interval_minutes']}m")
+        return
+
+    config.set_automation(enabled=True)
+    from nasync.automation import Automator
+    try:
+        Automator(reporter=click.echo).run(
+            on_change=a["on_change"], interval_minutes=a["interval_minutes"])
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        raise SystemExit(1)
+
+
+@main.command()
 @click.option("--pair", default=None, help="Specific pair to watch")
 def watch(pair):
-    """Watch local directories and auto-sync on changes"""
+    """Watch local directories and auto-sync on changes (alias: nasync auto)"""
     watcher = Watcher()
     try:
         watcher.watch_pairs(pair)

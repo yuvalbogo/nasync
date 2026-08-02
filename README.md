@@ -235,16 +235,21 @@ nasync sync
 | `nasync add <local> <server>` | Add a sync pair |
 | `nasync list` | Show all sync pairs |
 | `nasync remove <name>` | Remove a sync pair |
-| `nasync sync [--pair NAME]` | Manual sync to server |
+| `nasync sync [--pair NAME] [--no-delete]` | Incremental mirror sync to server |
 | `nasync restore [--pair NAME]` | Restore from server |
+| `nasync auto [--interval N] [--no-on-change]` | Auto-sync on changes and/or every N min |
 | `nasync watch [--pair NAME]` | Auto-sync on file changes |
 
 ## How It Works
 
-- **Push (sync)**: Uploads all files from local directories to server
+- **Push (sync)** — *incremental mirror*: only new or changed files are
+  uploaded (unchanged files, matched by size, are skipped), and files removed
+  locally are deleted on the server so it mirrors your folder. Use
+  `--no-delete` to keep server-only files.
 - **Pull (restore)**: Downloads all files from server to local directories
-- **Watch**: Monitors local directories with inotify (Linux) / FSEvents (macOS); syncs when files change
-- **Local is source of truth**: Server is always overwritten during sync
+- **Automation** (`nasync auto`): keeps folders synced automatically — on file
+  changes and/or every N minutes
+- **Local is source of truth**: the server mirrors the local folders
 
 ### Architecture: how it talks to the server
 
@@ -330,24 +335,25 @@ Schedule automatic daily sync at 2 AM:
 0 2 * * * export SAMBA_PASSWORD=$(cat ~/.samba-pass) && nasync sync
 ```
 
-### Watch and Sync in Background
+### Automatic syncing in the background
 
-Run as daemon to sync on file changes:
+Keep folders synced on changes and every 15 minutes:
 
 ```bash
-nasync watch &
+nasync auto --interval 15
 ```
 
-Or in systemd user service (`~/.config/systemd/user/nasync.service`):
+Or run it as a systemd **user** service (`~/.config/systemd/user/nasync.service`)
+so it starts at login and restarts on failure:
 
 ```ini
 [Unit]
-Description=SAMBA Sync Auto Watcher
-After=network.target
+Description=nasync automatic backup
+After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/nasync watch
+ExecStart=%h/.local/bin/nasync auto --interval 15
 Restart=always
 RestartSec=10
 

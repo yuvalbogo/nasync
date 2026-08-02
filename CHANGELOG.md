@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Incremental mirror sync.** `sync` now uploads only new/changed files
+  (unchanged files, matched by size, are skipped) and deletes server files that
+  were removed locally, so the server mirrors your folder — much faster on
+  repeat runs. `--no-delete` keeps server-only files.
+- **Automation layer.** `nasync auto` keeps folders synced automatically —
+  on file changes (watch) and/or every N minutes (`--interval`), with settings
+  remembered; ideal as a systemd user service. The TUI has an **Auto-sync**
+  toggle for a live session watcher.
 - **Saved, named servers.** Configure multiple servers, each with a name, and
   switch the active one instead of re-entering IP/user/share every time. New
   CLI commands `servers` (list) and `use <name>` (switch active); `init`/`setup`
@@ -14,10 +22,11 @@ All notable changes to this project will be documented in this file.
 - **TUI redesign around saved servers + native progress.** The server section
   is now a compact list of saved servers — pick one to activate; the connection
   fields live in an Add/Edit modal (with a Test button). This frees the left
-  column for a larger **Sync pairs** area. Transfers show a dedicated
-  **Progress** panel: a native progress bar with percentage + ETA, a live
-  `X / N files` object counter, and elapsed time. Sync pairs can now be
-  **edited** in place (Edit button / `update_pair`), not just added/removed.
+  column for a larger **Sync pairs** area. Transfers show a native progress bar
+  with percentage + ETA, a live `X / N files` object counter, and elapsed time,
+  now embedded at the top of the **Activity** (log) card as a styled progress
+  box. Sync pairs can be **edited** in place (Edit button / `update_pair`). In
+  modals, **Enter** confirms and **Esc** cancels.
 - **Project layout:** renamed the Python package `samba_sync` → `nasync` (so
   the package, command, distribution, and config dir all share one name).
   Removed redundant `setup.py` and `requirements.txt` — packaging metadata now

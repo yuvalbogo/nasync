@@ -18,7 +18,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button, DataTable, Footer, Header, Input, Label, ListItem, ListView,
-    ProgressBar, RichLog, Select,
+    ProgressBar, RichLog, Rule, Select,
 )
 
 from nasync.config import Config
@@ -29,10 +29,18 @@ from nasync.sync import Syncer
 class AddPairScreen(ModalScreen):
     """Modal to add or edit one local→server sync pair."""
 
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
     def __init__(self, pair: dict = None):
         super().__init__()
         self._pair = pair or {}
         self._orig_name = self._pair.get("name")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event) -> None:
+        self._confirm()  # Enter in any field saves
 
     def compose(self) -> ComposeResult:
         editing = bool(self._pair)
@@ -56,7 +64,10 @@ class AddPairScreen(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "ap-cancel":
             self.dismiss(None)
-            return
+        elif event.button.id == "ap-ok":
+            self._confirm()
+
+    def _confirm(self) -> None:
         local = self.query_one("#ap-local", Input).value.strip()
         dest = self.query_one("#ap-dest", Input).value.strip()
         name = self.query_one("#ap-name", Input).value.strip() or None
@@ -70,10 +81,18 @@ class AddPairScreen(ModalScreen):
 class AddServerScreen(ModalScreen):
     """Modal to add or edit a named server, with a live share loader."""
 
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
     def __init__(self, server: dict = None):
         super().__init__()
         self._server = server or {}
         self._orig_name = self._server.get("name")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_input_submitted(self, event) -> None:
+        self._save()  # Enter in any field saves
 
     def compose(self) -> ComposeResult:
         box = Vertical(id="dialog")
@@ -200,11 +219,22 @@ class NasyncApp(App):
     .buttons { height: auto; align: left middle; margin-top: 1; }
     Button { margin: 0 1 0 0; border: none; height: 3; min-width: 8; }
 
-    #progress-section { height: auto; }
+    /* progress lives at the top of the Activity (log) card */
+    #progress-box {
+        height: auto;
+        background: $boost;
+        border: round $primary 40%;
+        padding: 1 2;
+        margin-bottom: 1;
+    }
     #current { height: 1; text-style: bold; }
-    #bar { margin: 1 0; width: 1fr; align-horizontal: left; }
+    #bar { margin: 1 0 0 0; width: 1fr; }
     #bar Bar { width: 1fr; }
+    #bar Bar > .bar--bar { color: $accent; }
+    #bar Bar > .bar--complete { color: $success; }
+    #bar PercentageStatus { color: $accent; text-style: bold; }
     #counter { color: $text-muted; height: 1; }
+    #log-divider { color: $primary 30%; margin: 0; }
     #log { height: 1fr; background: $surface; }
 
     #dialog {
@@ -255,11 +285,14 @@ class NasyncApp(App):
                     yield Button("Sync ▶", variant="primary", id="btn-sync")
                     yield Button("Dry-run", id="btn-dryrun")
                     yield Button("Restore ◀", variant="warning", id="btn-restore")
-            with self._section("Progress", id="progress-section"):
-                yield Label("[dim]Idle[/dim]", id="current")
-                yield ProgressBar(id="bar", total=100, show_eta=True)
-                yield Label("", id="counter")
-            with self._section("Log", id="log-section"):
+                with Horizontal(classes="buttons"):
+                    yield Button("Auto-sync: Off", id="btn-auto")
+            with self._section("Activity", id="log-section"):
+                with Vertical(id="progress-box"):
+                    yield Label("[dim]Idle[/dim]", id="current")
+                    yield ProgressBar(id="bar", total=100, show_eta=True)
+                    yield Label("", id="counter")
+                yield Rule(id="log-divider")
                 yield RichLog(id="log", markup=True, wrap=True)
         yield Footer()
 
@@ -334,7 +367,8 @@ class NasyncApp(App):
     def _on_progress(self, done: int, total, name: str, verb: str) -> None:
         self.query_one("#bar", ProgressBar).update(
             total=total if total else None, progress=done)
-        self.query_one("#current", Label).update(f"{verb} [b]{name}[/b]")
+        icon = "↑" if verb == "Uploading" else "↓"
+        self.query_one("#current", Label).update(f"[$accent]{icon}[/] {verb} [b]{name}[/b]")
         elapsed = self._fmt_elapsed(time.monotonic() - getattr(self, "_t0", time.monotonic()))
         objs = f"{done} / {total} files" if total else f"{done} files"
         self.query_one("#counter", Label).update(f"{objs}  ·  {elapsed} elapsed")
@@ -364,6 +398,7 @@ class NasyncApp(App):
             "btn-sync": lambda: self._start_transfer("push", dry_run=False),
             "btn-dryrun": lambda: self._start_transfer("push", dry_run=True),
             "btn-restore": lambda: self._start_transfer("pull", dry_run=False),
+            "btn-auto": self._toggle_auto,
         }
         handler = handlers.get(event.button.id)
         if handler:
@@ -487,6 +522,67 @@ class NasyncApp(App):
         self.config.remove_pair(pair["name"])
         self._refresh_pairs()
         self._log(f"[green]✓ Removed pair '{pair['name']}'[/green]")
+
+    # ------------------------------------------------------------------ #
+    # Auto-sync (live, session-only file watcher)
+    # ------------------------------------------------------------------ #
+    def _toggle_auto(self) -> None:
+        if getattr(self, "_observer", None):
+            self._stop_auto()
+        else:
+            self._start_auto()
+
+    def _start_auto(self) -> None:
+        import os
+        from watchdog.observers import Observer
+        from nasync.automation import _DebouncedHandler
+
+        if not self.config.get_active_server_name():
+            self._log("[red]✗ Pick a server before enabling auto-sync.[/red]")
+            return
+        pairs = [p for p in self.config.get_pairs() if os.path.isdir(p["local"])]
+        if not pairs:
+            self._log("[yellow]No local folders to watch.[/yellow]")
+            return
+
+        self._observer = Observer()
+        self._auto_handlers = []
+        trigger = lambda: self.call_from_thread(self._auto_fire)  # noqa: E731
+        for p in pairs:
+            handler = _DebouncedHandler(trigger)
+            self._auto_handlers.append(handler)
+            self._observer.schedule(handler, p["local"], recursive=True)
+        self._observer.start()
+
+        btn = self.query_one("#btn-auto", Button)
+        btn.label = "Auto-sync: On"
+        btn.variant = "success"
+        self._log(f"[green]👁️  Auto-sync ON[/green] — watching {len(pairs)} folder(s)")
+
+    def _auto_fire(self) -> None:
+        self._log("[dim]Auto-sync: change detected[/dim]")
+        self._start_transfer("push", dry_run=False)
+
+    def _stop_auto(self) -> None:
+        for h in getattr(self, "_auto_handlers", []):
+            h.cancel()
+        if getattr(self, "_observer", None):
+            self._observer.stop()
+            self._observer.join()
+        self._observer = None
+        self._auto_handlers = []
+        btn = self.query_one("#btn-auto", Button)
+        btn.label = "Auto-sync: Off"
+        btn.variant = "default"
+        self._log("[yellow]⏸️  Auto-sync OFF[/yellow]")
+
+    def on_unmount(self) -> None:
+        for h in getattr(self, "_auto_handlers", []):
+            h.cancel()
+        observer = getattr(self, "_observer", None)
+        if observer:
+            observer.stop()
+            observer.join()
 
     # ------------------------------------------------------------------ #
     # Transfers
