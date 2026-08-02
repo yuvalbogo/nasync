@@ -23,11 +23,13 @@ class Config:
         with open(self.config_file, "w") as f:
             json.dump(self.data, f, indent=2)
 
-    def set_server(self, ip: str, username: str, password: str, share: str):
+    def set_server(self, ip: str, username: str, password: str, share: str,
+                   port: int = 445):
         self.data["server"] = {
             "ip": ip,
             "username": username,
             "share": share,
+            "port": int(port),
         }
         with open(self.creds_file, "w") as f:
             f.write(password)
@@ -45,6 +47,7 @@ class Config:
             "username": server.get("username"),
             "password": password,
             "share": server.get("share"),
+            "port": server.get("port", 445),
         }
 
     def add_pair(self, local_path: str, server_path: str, name: str = None):

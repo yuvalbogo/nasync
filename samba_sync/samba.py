@@ -12,11 +12,13 @@ class SAMBAClient:
     driven by smbclient's own scripting commands fed over stdin.
     """
 
-    def __init__(self, ip: str, username: str, password: str, share: str):
+    def __init__(self, ip: str, username: str, password: str, share: str,
+                 port: int = 445):
         self.ip = ip
         self.username = username
         self.password = password
         self.share = share
+        self.port = int(port)
         self.url = f"//{ip}/{share}"
 
     # ------------------------------------------------------------------ #
@@ -29,7 +31,7 @@ class SAMBAClient:
         env["PASSWD"] = self.password  # smbclient reads password from $PASSWD
         try:
             return subprocess.run(
-                ["smbclient", self.url, "-U", self.username, "-p", "445"],
+                ["smbclient", self.url, "-U", self.username, "-p", str(self.port)],
                 input=script,
                 capture_output=True,
                 text=True,

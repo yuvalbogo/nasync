@@ -27,6 +27,7 @@ class Syncer:
             server_config["username"],
             server_config["password"],
             server_config["share"],
+            port=server_config.get("port", 445),
         )
         return client, pairs
 

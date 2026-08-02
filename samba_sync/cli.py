@@ -20,10 +20,11 @@ def init():
     username = click.prompt("Username")
     password = getpass("Password: ")
     share = click.prompt("Share name", default="backup")
+    port = click.prompt("SMB port", default=445, type=int)
 
     config = Config()
-    config.set_server(ip, username, password, share)
-    click.echo(f"✅ Server configured: {ip}")
+    config.set_server(ip, username, password, share, port)
+    click.echo(f"✅ Server configured: {ip}:{port}")
 
 
 @main.command()
@@ -140,7 +141,7 @@ def status():
         raise SystemExit(1)
 
     click.echo(f"\n📊 SAMBA Sync Status")
-    click.echo(f"  Server: {server_config['ip']}:{server_config['share']}")
+    click.echo(f"  Server: {server_config['ip']}:{server_config['port']}/{server_config['share']}")
     click.echo(f"  User: {server_config['username']}")
     click.echo(f"  Pairs: {len(pairs)}")
 
