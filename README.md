@@ -216,6 +216,43 @@ nasync sync
 - **Watch**: Monitors local directories with inotify (Linux) / FSEvents (macOS); syncs when files change
 - **Local is source of truth**: Server is always overwritten during sync
 
+### Architecture: how it talks to the server
+
+nasync speaks the **native SMB/CIFS protocol** — the same one your file
+manager uses for `smb://192.168.1.100/`. It does **not** use SSH, and it does
+**not** bundle a Python SMB library. Instead it drives the system's
+**`smbclient`** binary (from the Samba project) as a subprocess:
+
+```
+nasync (Python)
+   └─ subprocess → smbclient           (Samba's command-line SMB client)
+        └─ SMB/CIFS over TCP port 445  →  your server's Samba share
+```
+
+Details worth knowing:
+
+- **One connection per sync.** Each operation builds a list of `smbclient`
+  scripting commands (`cd`, `mkdir`, `put`, `recurse ON; mget`, …) and pipes
+  them into a **single** `smbclient` session over stdin — not a new connection
+  per file — which keeps large directory trees fast.
+- **Credentials** are passed to `smbclient` via the `PASSWD` environment
+  variable, so your password never appears in the process argument list.
+- **Port** is whatever you configured (default `445`).
+- **Containers are transparent.** If your server runs Samba in Docker, nasync
+  just connects to the host's published `IP:445` — exactly like your file
+  manager. It neither knows nor cares that a container is behind it.
+
+**Why this design:**
+
+- ✅ `smbclient` is battle-tested and speaks modern SMB2/3 — no reimplementing
+  the protocol in Python
+- ✅ Keeps the core essentially dependency-free (matches the lightweight goal)
+  and behaves identically on Linux and macOS
+- ⚠️ Trade-off: it **requires `smbclient` to be installed** (the
+  `smbclient` / `samba-client` package — see [Requirements](#requirements)).
+  That's the one external runtime dependency; nasync prints an install hint if
+  the binary is missing.
+
 ## Requirements
 
 - Python 3.8+
