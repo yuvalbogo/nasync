@@ -98,11 +98,12 @@ def sync(pair, dry_run):
 @main.command()
 @click.option("--pair", default=None, help="Specific pair name to restore")
 @click.option("--dry-run", is_flag=True, help="Show what would be restored without doing it")
-def restore(pair, dry_run):
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+def restore(pair, dry_run, yes):
     """Restore local directories from server backup"""
     if dry_run:
         click.echo("🔍 Dry-run mode (no files will be transferred)")
-    else:
+    elif not yes:
         click.echo("⚠️  This will overwrite local files with server versions")
         if not click.confirm("Continue?"):
             click.echo("Cancelled.")

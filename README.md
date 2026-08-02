@@ -154,6 +154,25 @@ samba-sync sync
 - SAMBA share accessible on your network
 - Read/write permissions on SAMBA share
 
+## Testing
+
+No NAS needed — `scripts/local-test.sh` spins up a throwaway Samba server in a
+container (podman or docker), runs a full push → verify → restore → dry-run
+cycle against it in an isolated config, and tears everything down afterwards:
+
+```bash
+pip install -e .
+./scripts/local-test.sh          # full end-to-end test
+KEEP=1 ./scripts/local-test.sh   # leave the server/config up to poke at
+```
+
+Pure-logic unit tests (no server required):
+
+```bash
+python -m samba_sync.test_config
+python -m samba_sync.test_samba
+```
+
 ## Contributing
 
 Contributions welcome! Please feel free to submit issues or pull requests.
