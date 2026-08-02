@@ -1,4 +1,4 @@
-<img src="samba_sync/assets/nasync.svg" width="104" align="right" alt="nasync icon"/>
+<img src="samba_sync/assets/nasync_logo.png" width="96" align="right" alt="nasync logo"/>
 
 # nasync
 

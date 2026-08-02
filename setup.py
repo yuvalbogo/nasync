@@ -8,7 +8,7 @@ setup(
     author_email="yuvalbogo2@gmail.com",
     packages=find_packages(),
     include_package_data=True,
-    package_data={"samba_sync": ["assets/*.svg"]},
+    package_data={"samba_sync": ["assets/nasync.svg"]},
     install_requires=[
         "click==8.1.7",
         "watchdog==3.0.0",

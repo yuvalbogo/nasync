@@ -53,7 +53,7 @@ Issues = "https://github.com/YuvalBogo/nasync/issues"
 nasync = "samba_sync.cli:main"
 
 [tool.setuptools.package-data]
-samba_sync = ["assets/*.svg"]
+samba_sync = ["assets/nasync.svg"]
 
 [tool.black]
 line-length = 100
