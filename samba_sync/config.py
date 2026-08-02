@@ -48,15 +48,21 @@ class Config:
         }
 
     def add_pair(self, local_path: str, server_path: str, name: str = None):
-        local_path = os.path.expanduser(local_path)
+        local_path = os.path.abspath(os.path.expanduser(local_path))
         if name is None:
-            name = os.path.basename(local_path)
+            name = os.path.basename(local_path.rstrip("/")) or "root"
+        if self.get_pair(name):
+            raise ValueError(
+                f"A pair named '{name}' already exists. "
+                f"Use --name to choose a different name, or remove it first."
+            )
         self.data["pairs"].append({
             "name": name,
             "local": local_path,
             "server": server_path,
         })
         self.save()
+        return name
 
     def remove_pair(self, name: str):
         self.data["pairs"] = [p for p in self.data["pairs"] if p["name"] != name]

@@ -33,9 +33,15 @@ def init():
 def add(local_path, server_path, name):
     """Add a new sync pair"""
     config = Config()
-    config.add_pair(local_path, server_path, name)
-    pair_name = name or local_path.split("/")[-1]
+    try:
+        pair_name = config.add_pair(local_path, server_path, name)
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
     click.echo(f"✅ Added sync pair: {pair_name}")
+    import os
+    if not os.path.isdir(os.path.expanduser(local_path)):
+        click.echo(f"⚠️  Note: local path does not exist yet: {local_path}")
 
 
 @main.command()
@@ -77,11 +83,11 @@ def remove(name):
 def sync(pair, dry_run):
     """Manually sync local directories to server"""
     if dry_run:
-        click.echo("🔍 Dry-run mode (no files will be synced)")
+        click.echo("🔍 Dry-run mode (no files will be transferred)")
 
     syncer = Syncer()
     try:
-        syncer.sync_pair(pair)
+        syncer.sync_pair(pair, dry_run=dry_run)
         click.echo("\n✅ Sync completed!")
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
@@ -90,16 +96,20 @@ def sync(pair, dry_run):
 
 @main.command()
 @click.option("--pair", default=None, help="Specific pair name to restore")
-def restore(pair):
+@click.option("--dry-run", is_flag=True, help="Show what would be restored without doing it")
+def restore(pair, dry_run):
     """Restore local directories from server backup"""
-    click.echo("⚠️  This will overwrite local files with server versions")
-    if not click.confirm("Continue?"):
-        click.echo("Cancelled.")
-        return
+    if dry_run:
+        click.echo("🔍 Dry-run mode (no files will be transferred)")
+    else:
+        click.echo("⚠️  This will overwrite local files with server versions")
+        if not click.confirm("Continue?"):
+            click.echo("Cancelled.")
+            return
 
     syncer = Syncer()
     try:
-        syncer.restore_pair(pair)
+        syncer.restore_pair(pair, dry_run=dry_run)
         click.echo("\n✅ Restore completed!")
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)

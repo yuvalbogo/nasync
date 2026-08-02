@@ -1,4 +1,3 @@
-import sys
 from samba_sync.config import Config
 from samba_sync.samba import SAMBAClient
 
@@ -7,9 +6,11 @@ class Syncer:
     def __init__(self):
         self.config = Config()
 
-    def sync_pair(self, pair_name: str = None):
+    def _prepare(self, pair_name):
+        """Validate config and return (client, pairs) ready to transfer."""
         server_config = self.config.get_server_config()
-        if not all(server_config.values()):
+        # Password may legitimately be blank (guest shares); the rest is required.
+        if not all(server_config.get(k) for k in ("ip", "username", "share")):
             raise Exception("Server not configured. Run 'samba-sync init' first.")
 
         pairs = self.config.get_pairs()
@@ -27,72 +28,46 @@ class Syncer:
             server_config["password"],
             server_config["share"],
         )
+        return client, pairs
 
-        synced_count = 0
-        failed_count = 0
+    def sync_pair(self, pair_name: str = None, dry_run: bool = False):
+        self._run(pair_name, direction="push", dry_run=dry_run)
 
+    def restore_pair(self, pair_name: str = None, dry_run: bool = False):
+        self._run(pair_name, direction="pull", dry_run=dry_run)
+
+    def _run(self, pair_name, direction, dry_run):
+        client, pairs = self._prepare(pair_name)
+        verb, icon = ("Syncing", "📤") if direction == "push" else ("Restoring", "📥")
+
+        ok = 0
+        failed = 0
         try:
-            client.connect()
+            # A push dry-run only reads local disk, so don't require the server.
+            if not dry_run:
+                client.connect()
             for pair in pairs:
-                print(f"\n📤 Syncing: {pair['name']}")
-                print(f"  Local:  {pair['local']}")
-                print(f"  Server: {pair['server']}")
+                print(f"\n{icon} {verb}: {pair['name']}")
+                if direction == "push":
+                    print(f"  Local:  {pair['local']}")
+                    print(f"  Server: {pair['server']}")
+                else:
+                    print(f"  From Server: {pair['server']}")
+                    print(f"  To Local:    {pair['local']}")
                 try:
-                    client.sync_directory(pair["local"], pair["server"], direction="push")
-                    print(f"✅ {pair['name']} synced successfully")
-                    synced_count += 1
+                    client.sync_directory(
+                        pair["local"], pair["server"],
+                        direction=direction, dry_run=dry_run,
+                    )
+                    print(f"✅ {pair['name']} done")
+                    ok += 1
                 except Exception as e:
-                    print(f"❌ Failed to sync {pair['name']}: {e}")
-                    failed_count += 1
+                    print(f"❌ Failed on {pair['name']}: {e}")
+                    failed += 1
         finally:
             client.disconnect()
 
-        if failed_count > 0:
-            print(f"\n⚠️  Sync completed with {failed_count} error(s)")
-            if synced_count == 0:
-                raise SystemExit(1)
-
-    def restore_pair(self, pair_name: str = None):
-        server_config = self.config.get_server_config()
-        if not all(server_config.values()):
-            raise Exception("Server not configured. Run 'samba-sync init' first.")
-
-        pairs = self.config.get_pairs()
-        if not pairs:
-            raise Exception("No sync pairs configured. Run 'samba-sync add' first.")
-
-        if pair_name:
-            pairs = [p for p in pairs if p["name"] == pair_name]
-            if not pairs:
-                raise Exception(f"Pair '{pair_name}' not found.")
-
-        client = SAMBAClient(
-            server_config["ip"],
-            server_config["username"],
-            server_config["password"],
-            server_config["share"],
-        )
-
-        restored_count = 0
-        failed_count = 0
-
-        try:
-            client.connect()
-            for pair in pairs:
-                print(f"\n📥 Restoring: {pair['name']}")
-                print(f"  From Server: {pair['server']}")
-                print(f"  To Local:    {pair['local']}")
-                try:
-                    client.sync_directory(pair["local"], pair["server"], direction="pull")
-                    print(f"✅ {pair['name']} restored successfully")
-                    restored_count += 1
-                except Exception as e:
-                    print(f"❌ Failed to restore {pair['name']}: {e}")
-                    failed_count += 1
-        finally:
-            client.disconnect()
-
-        if failed_count > 0:
-            print(f"\n⚠️  Restore completed with {failed_count} error(s)")
-            if restored_count == 0:
+        if failed:
+            print(f"\n⚠️  Completed with {failed} error(s)")
+            if ok == 0:
                 raise SystemExit(1)

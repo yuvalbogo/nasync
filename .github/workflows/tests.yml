@@ -29,7 +29,7 @@ jobs:
 
     - name: Install samba-client (Ubuntu)
       if: runner.os == 'Linux'
-      run: sudo apt-get install -y samba-client
+      run: sudo apt-get install -y smbclient
 
     - name: Install samba-client (macOS)
       if: runner.os == 'macOS'

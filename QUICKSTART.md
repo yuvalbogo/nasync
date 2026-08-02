@@ -9,7 +9,7 @@ Get SAMBA Sync Auto running in 5 minutes.
 **Ubuntu/Debian:**
 ```bash
 sudo apt update
-sudo apt install python3-pip samba-client
+sudo apt install python3-pip smbclient
 ```
 
 **Fedora/RHEL:**

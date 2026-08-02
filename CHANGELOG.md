@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Performance**: sync/restore now run in a single `smbclient` session per
+  directory (native recursion) instead of opening a new SMB connection for
+  every file — dramatically faster on large trees.
+- **Auth**: pass the password via `PASSWD` (the variable `smbclient` actually
+  reads); the previous `SMBCLIENT_PASSWORD` was never picked up, which could
+  stall non-interactive syncs.
+- **Nested directories**: parent directories are now created in order, so
+  deeply nested trees push correctly.
+- **Restore reliability**: replaced fragile `ls` output parsing (which
+  misdetected any file modified in December as a directory) with `mget`.
+- **Watch**: switched to a trailing-edge debounce so the final state after a
+  burst of edits is always synced (previously trailing changes could be lost).
+- `--dry-run` now actually previews instead of performing the transfer, and a
+  push dry-run works without contacting the server.
+- Duplicate sync-pair names are rejected; blank-password (guest) shares work.
+
 ## [0.1.0] - 2026-08-02
 
 ### Added

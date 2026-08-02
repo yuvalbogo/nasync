@@ -148,7 +148,7 @@ samba-sync sync
 
 - Python 3.8+
 - `samba-client` package (for smbclient tool)
-  - **Ubuntu/Debian**: `sudo apt install samba-client`
+  - **Ubuntu/Debian**: `sudo apt install smbclient`
   - **Fedora/RHEL**: `sudo dnf install samba-client`
   - **macOS**: `brew install samba`
 - SAMBA share accessible on your network
