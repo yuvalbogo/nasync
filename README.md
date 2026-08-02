@@ -160,10 +160,65 @@ Contributions welcome! Please feel free to submit issues or pull requests.
 
 MIT License
 
+## Common Use Cases
+
+### Daily Backup via Cron
+
+Schedule automatic daily sync at 2 AM:
+
+```bash
+0 2 * * * export SAMBA_PASSWORD=$(cat ~/.samba-pass) && samba-sync sync
+```
+
+### Watch and Sync in Background
+
+Run as daemon to sync on file changes:
+
+```bash
+samba-sync watch &
+```
+
+Or in systemd user service (`~/.config/systemd/user/samba-sync.service`):
+
+```ini
+[Unit]
+Description=SAMBA Sync Auto Watcher
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/samba-sync watch
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+Enable and start:
+```bash
+systemctl --user enable samba-sync
+systemctl --user start samba-sync
+```
+
+### Multi-Directory Sync
+
+Sync different directories on different schedules:
+
+```bash
+# Sync everything at once
+samba-sync sync
+
+# Sync only Documents (faster for quick backups)
+samba-sync sync --pair Documents
+
+# Restore only Downloads if needed
+samba-sync restore --pair Downloads
+```
+
 ## Acknowledgments
 
 Built with:
 - [Click](https://click.palletsprojects.com/) - CLI framework
-- [smb-protocol](https://github.com/jborean93/smbprotocol) - SAMBA client
 - [watchdog](https://github.com/gorakhargosh/watchdog) - File system monitoring
 - [appdirs](https://github.com/ActiveState/appdirs) - Platform-specific paths
