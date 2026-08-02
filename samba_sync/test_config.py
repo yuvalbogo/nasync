@@ -17,8 +17,8 @@ def test_config_creation():
     with tempfile.TemporaryDirectory() as tmpdir:
         config = _fresh_config(tmpdir)
 
-        config.set_server("10.100.102.200", "testuser", "testpass", "backup")
-        assert config.data["server"]["ip"] == "10.100.102.200"
+        config.set_server("192.0.2.10", "testuser", "testpass", "backup")
+        assert config.data["server"]["ip"] == "192.0.2.10"
         assert config.config_file.exists()
         # Password lives only in the creds file, never in config.json.
         assert "testpass" not in config.config_file.read_text()

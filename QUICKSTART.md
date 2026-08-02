@@ -44,7 +44,7 @@ samba-sync init
 ```
 
 You'll be prompted for:
-- Server IP (e.g., `10.100.102.200`)
+- Server IP (e.g., `192.168.1.100`)
 - SAMBA username
 - SAMBA password
 - Share name (e.g., `backup`)
@@ -66,7 +66,7 @@ samba-sync status
 Should output:
 ```
 📊 SAMBA Sync Status
-  Server: 10.100.102.200:backup
+  Server: 192.168.1.100:backup
   User: yourname
   Pairs: 3
 

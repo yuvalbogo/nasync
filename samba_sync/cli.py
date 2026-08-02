@@ -16,7 +16,7 @@ def main():
 def init():
     """Initialize SAMBA server configuration"""
     click.echo("🔧 SAMBA Server Setup")
-    ip = click.prompt("Server IP address", default="10.100.102.200")
+    ip = click.prompt("Server IP address (e.g. 192.168.1.100)")
     username = click.prompt("Username")
     password = getpass("Password: ")
     share = click.prompt("Share name", default="backup")

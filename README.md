@@ -38,7 +38,7 @@ samba-sync init
 ```
 
 You'll be prompted for:
-- Server IP address (default: `10.100.102.200`)
+- Server IP address (e.g. `192.168.1.100`)
 - SAMBA username
 - SAMBA password
 - Share name (default: `backup`)
@@ -96,7 +96,7 @@ Example config structure:
 ```json
 {
   "server": {
-    "ip": "10.100.102.200",
+    "ip": "192.168.1.100",
     "username": "backup_user",
     "share": "backup"
   },
