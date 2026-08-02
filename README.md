@@ -48,10 +48,15 @@ You'll be prompted for:
 Add directories to sync. Local and server paths can have different names:
 
 ```bash
-samba-sync add ~/Documents /backups/docs
-samba-sync add ~/Downloads /backups/downloads
-samba-sync add ~/Projects /server/work
+samba-sync add ~/Documents /docs
+samba-sync add ~/Downloads /downloads
+samba-sync add ~/Projects /work
 ```
+
+> **The server path is relative to the share root — do _not_ repeat the share
+> name in it.** If your share is `backup` and you pass `/docs`, files land in
+> `backup/docs` on the server. Passing `/backup/docs` would create a *nested*
+> `backup/backup/docs`.
 
 ### 3. List Your Configuration
 
@@ -98,17 +103,34 @@ Example config structure:
   "server": {
     "ip": "192.168.1.100",
     "username": "backup_user",
-    "share": "backup"
+    "share": "backup",
+    "port": 445
   },
   "pairs": [
     {
       "name": "Documents",
       "local": "/home/user/Documents",
-      "server": "/backups/docs"
+      "server": "/docs"
     }
   ]
 }
 ```
+
+### Understanding server paths
+
+A pair's `server` path is **relative to the root of the SMB share**, not an
+absolute path on the server's filesystem. Think of the share as the top level.
+
+With share `backup` mounted at, say, `/srv/samba/backup` on the server:
+
+| `share`  | pair `server` path | Ends up on the server as        |
+|----------|--------------------|---------------------------------|
+| `backup` | `/docs`            | `backup/docs` → `/srv/samba/backup/docs`  |
+| `backup` | `/photos/2024`     | `backup/photos/2024`            |
+| `backup` | `/backup/docs` ⚠️   | `backup/backup/docs` (double-nested — usually a mistake) |
+
+So the share name comes from `samba-sync init`; the `server` path in each pair
+is just where *inside* that share the files should go.
 
 ### Using Environment Variables
 

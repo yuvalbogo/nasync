@@ -52,10 +52,13 @@ You'll be prompted for:
 ### 2. Add directories to sync
 
 ```bash
-samba-sync add ~/Documents /server/docs
-samba-sync add ~/Downloads /server/downloads
-samba-sync add ~/Projects /server/code
+samba-sync add ~/Documents /docs
+samba-sync add ~/Downloads /downloads
+samba-sync add ~/Projects /code
 ```
+
+> The second argument is relative to the **share root** — don't repeat the
+> share name. See [Understanding server paths](README.md#understanding-server-paths).
 
 ### 3. View your configuration
 
@@ -71,9 +74,9 @@ Should output:
   Pairs: 3
 
   Configured pairs:
-    • Documents: /home/user/Documents → /server/docs
-    • Downloads: /home/user/Downloads → /server/downloads
-    • Projects: /home/user/Projects → /server/code
+    • Documents: /home/user/Documents → /docs
+    • Downloads: /home/user/Downloads → /downloads
+    • Projects: /home/user/Projects → /code
 ```
 
 ## Usage
