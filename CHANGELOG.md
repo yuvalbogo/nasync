@@ -77,8 +77,11 @@ All notable changes to this project will be documented in this file.
 - Detailed logging of sync operations
 
 ## Future Roadmap
-- Delta/incremental sync mode
-- Dry-run capability
+- **macOS `.app` bundle**: a `nasync install-desktop` equivalent for macOS that
+  generates `~/Applications/nasync.app` (Info.plist + `.icns` icon assembled
+  from the SVG via `iconutil` + a launcher that opens the TUI in Terminal), so
+  Mac users get a clickable app too. Deferred until it can be verified on real
+  macOS hardware (Gatekeeper behaviour and the Terminal launch need testing).
+- Delta/incremental sync mode (only transfer changed files)
 - Conflict resolution strategies
-- GUI implementation
 - Performance optimizations for large directories
