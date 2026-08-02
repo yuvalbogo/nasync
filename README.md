@@ -42,6 +42,17 @@ You'll be prompted for:
 - SAMBA username
 - SAMBA password
 - Share name (default: `backup`)
+- SMB port (default: `445` — press Enter unless your server uses a custom port)
+
+Then confirm it all works before going further:
+
+```bash
+samba-sync test-connection
+```
+
+This checks the server is reachable, your credentials are accepted, and the
+share exists. If the share name is wrong, it lists the shares that *are*
+available so you can fix it.
 
 ### 2. Add Sync Pairs
 
@@ -152,6 +163,7 @@ samba-sync sync
 | Command | Description |
 |---------|-------------|
 | `samba-sync init` | Initialize server configuration |
+| `samba-sync test-connection` | Verify server, credentials, and share access |
 | `samba-sync add <local> <server>` | Add a sync pair |
 | `samba-sync list` | Show all sync pairs |
 | `samba-sync remove <name>` | Remove a sync pair |

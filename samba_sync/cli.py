@@ -2,6 +2,7 @@ import click
 from getpass import getpass
 from samba_sync import __version__
 from samba_sync.config import Config
+from samba_sync.samba import SAMBAClient
 from samba_sync.sync import Syncer
 from samba_sync.watch import Watcher
 
@@ -129,6 +130,48 @@ def watch(pair):
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
+
+
+@main.command(name="test-connection")
+def test_connection():
+    """Check server connectivity, credentials, and share access"""
+    config = Config()
+    sc = config.get_server_config()
+    if not all(sc.get(k) for k in ("ip", "username", "share")):
+        click.echo("❌ Server not configured. Run 'samba-sync init' first.", err=True)
+        raise SystemExit(1)
+
+    client = SAMBAClient(sc["ip"], sc["username"], sc["password"],
+                         sc["share"], port=sc.get("port", 445))
+    click.echo(
+        f"🔌 Testing {sc['ip']}:{sc['port']} "
+        f"(share '{sc['share']}', user '{sc['username']}')..."
+    )
+
+    connected = True
+    try:
+        client.connect()
+        click.echo("  ✓ Reached server, authenticated, and share is accessible")
+    except Exception as e:
+        click.echo(f"  ✗ {e}", err=True)
+        connected = False
+
+    # List shares too — especially useful when the share name is wrong.
+    try:
+        shares = client.list_shares()
+        if shares:
+            click.echo(f"  ℹ️  Available shares: {', '.join(shares)}")
+            if sc["share"] not in shares:
+                click.echo(
+                    f"  ⚠️  Configured share '{sc['share']}' is not in that list — "
+                    f"re-run 'samba-sync init' with one of the names above."
+                )
+    except Exception:
+        pass  # listing is best-effort; the connect() result is what matters
+
+    if not connected:
+        raise SystemExit(1)
+    click.echo("✅ Connection OK — you're ready to sync.")
 
 
 @main.command()

@@ -24,18 +24,18 @@ class SAMBAClient:
     # ------------------------------------------------------------------ #
     # Low-level session runner
     # ------------------------------------------------------------------ #
-    def _run_session(self, commands: list) -> subprocess.CompletedProcess:
-        """Feed a list of smbclient commands to a single session over stdin."""
-        script = "\n".join(commands) + "\n"
+    def _run_smbclient(self, args: list, script: str = None,
+                       timeout: int = 1800) -> subprocess.CompletedProcess:
+        """Invoke smbclient with the given args (auth/port appended)."""
         env = os.environ.copy()
         env["PASSWD"] = self.password  # smbclient reads password from $PASSWD
         try:
             return subprocess.run(
-                ["smbclient", self.url, "-U", self.username, "-p", str(self.port)],
+                ["smbclient", *args, "-U", self.username, "-p", str(self.port)],
                 input=script,
                 capture_output=True,
                 text=True,
-                timeout=1800,
+                timeout=timeout,
                 env=env,
             )
         except FileNotFoundError:
@@ -45,6 +45,39 @@ class SAMBAClient:
                 "  Fedora/RHEL:   sudo dnf install samba-client\n"
                 "  macOS:         brew install samba"
             )
+
+    def _run_session(self, commands: list) -> subprocess.CompletedProcess:
+        """Feed a list of smbclient commands to a single session over stdin."""
+        script = "\n".join(commands) + "\n"
+        return self._run_smbclient([self.url], script=script)
+
+    def list_shares(self) -> list:
+        """Return the names of disk shares the server exposes (best effort)."""
+        result = self._run_smbclient(["-L", f"//{self.ip}"], timeout=60)
+        output = self._combined_output(result)
+        fatal = self._fatal_error(output)
+        if fatal:
+            raise Exception(fatal)
+
+        shares = []
+        in_section = False
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Sharename"):
+                in_section = True
+                continue
+            if not in_section:
+                continue
+            if stripped.startswith("---"):
+                continue
+            if not stripped:          # blank line ends the share block
+                break
+            parts = stripped.split()
+            name, kind = parts[0], (parts[1] if len(parts) > 1 else "")
+            # Skip administrative/IPC shares (IPC$, print$, ADMIN$, ...).
+            if kind == "Disk" and not name.endswith("$"):
+                shares.append(name)
+        return shares
 
     @staticmethod
     def _combined_output(result: subprocess.CompletedProcess) -> str:

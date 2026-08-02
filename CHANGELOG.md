@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `test-connection` command: verifies the server is reachable, credentials are
+  accepted, and the configured share exists — and lists available shares when
+  the configured one is wrong.
+- Configurable SMB port (prompted during `init`, default 445).
+- `restore --yes/-y` to skip the confirmation prompt (for automation).
+
 ### Fixed
 - **Performance**: sync/restore now run in a single `smbclient` session per
   directory (native recursion) instead of opening a new SMB connection for
