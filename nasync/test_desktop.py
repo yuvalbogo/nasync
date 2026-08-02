@@ -11,7 +11,7 @@ def test_install_and_uninstall():
     tmp = tempfile.mkdtemp()
     os.environ["XDG_DATA_HOME"] = tmp
 
-    from samba_sync import desktop
+    from nasync import desktop
 
     written = desktop.install()
     desktop_file = os.path.join(tmp, "applications", "nasync.desktop")

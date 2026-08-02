@@ -2,7 +2,7 @@ import threading
 import time
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from samba_sync.sync import Syncer
+from nasync.sync import Syncer
 
 
 class SyncEventHandler(FileSystemEventHandler):

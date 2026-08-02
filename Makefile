@@ -17,7 +17,7 @@ install-dev:
 	pip install -e ".[dev]"
 
 test:
-	python -m pytest samba_sync/test_*.py -v
+	python -m pytest nasync/test_*.py -v
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
@@ -25,7 +25,7 @@ clean:
 	rm -rf build/ dist/ *.egg-info/
 
 format:
-	black samba_sync/ --line-length 100
+	black nasync/ --line-length 100
 
 lint:
-	flake8 samba_sync/ --max-line-length 100
+	flake8 nasync/ --max-line-length 100

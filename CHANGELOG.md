@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **Project layout:** renamed the Python package `samba_sync` → `nasync` (so
+  the package, command, distribution, and config dir all share one name).
+  Removed redundant `setup.py` and `requirements.txt` — packaging metadata now
+  lives solely in `pyproject.toml`.
 - **TUI: live per-file progress.** Push/pull now stream `smbclient` output and
   emit a per-file progress callback, so the TUI shows a dnf-style progress bar
   with an `X/total` counter and the current file name.
@@ -28,8 +32,7 @@ All notable changes to this project will be documented in this file.
   summary instead of raising `SystemExit`. This lets non-CLI front-ends (the
   TUI) drive the same code and capture progress; CLI behaviour is unchanged.
 - **Renamed the command from `samba-sync` to `nasync`** (shorter to type). The
-  distribution and config directory are now `nasync` too
-  (`~/.config/nasync/`). The internal Python package remains `samba_sync`.
+  distribution and config directory are now `nasync` too (`~/.config/nasync/`).
 
 ### Added
 - `setup` command: a guided first-run wizard that collects server details with

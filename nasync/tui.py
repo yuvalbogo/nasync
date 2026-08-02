@@ -15,9 +15,9 @@ from textual.widgets import (
     Select, Static,
 )
 
-from samba_sync.config import Config
-from samba_sync.samba import SAMBAClient
-from samba_sync.sync import Syncer
+from nasync.config import Config
+from nasync.samba import SAMBAClient
+from nasync.sync import Syncer
 
 
 class AddPairScreen(ModalScreen):

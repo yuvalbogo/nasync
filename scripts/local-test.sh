@@ -85,7 +85,7 @@ say "Configuring nasync (isolated config at $XDG_CONFIG_HOME)"
 # Configure via the same API 'init' uses, so no interactive prompts are needed.
 python - "$PORT" "$USER_NAME" "$USER_PASS" "$SHARE" "$SRC" "$SERVER_SUBDIR" <<'PY'
 import sys
-from samba_sync.config import Config
+from nasync.config import Config
 port, user, pw, share, src, subdir = sys.argv[1:7]
 c = Config()
 c.set_server("127.0.0.1", user, pw, share, int(port))

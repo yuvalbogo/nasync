@@ -43,5 +43,5 @@ jobs:
       continue-on-error: true
 
     - name: Format check with black
-      run: black --check samba_sync/
+      run: black --check nasync/
       continue-on-error: true

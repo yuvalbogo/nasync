@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -50,15 +50,18 @@ Repository = "https://github.com/YuvalBogo/nasync.git"
 Issues = "https://github.com/YuvalBogo/nasync/issues"
 
 [project.scripts]
-nasync = "samba_sync.cli:main"
+nasync = "nasync.cli:main"
+
+[tool.setuptools]
+packages = ["nasync"]
 
 [tool.setuptools.package-data]
-samba_sync = ["assets/nasync.svg"]
+nasync = ["assets/nasync.svg"]
 
 [tool.black]
 line-length = 100
 target-version = ["py38"]
 
 [tool.pytest.ini_options]
-testpaths = ["samba_sync"]
+testpaths = ["nasync"]
 python_files = ["test_*.py"]

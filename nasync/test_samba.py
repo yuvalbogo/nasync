@@ -1,7 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
-from samba_sync.samba import SAMBAClient
+from nasync.samba import SAMBAClient
 
 
 def test_remote_path_normalisation():

@@ -33,8 +33,8 @@ def test_tui_flow():
     tmp = tempfile.mkdtemp()
     os.environ["XDG_CONFIG_HOME"] = tmp
 
-    import samba_sync.tui as tui
-    from samba_sync.config import Config
+    import nasync.tui as tui
+    from nasync.config import Config
     from textual.widgets import Input, Select
 
     tui.SAMBAClient = _FakeSMB

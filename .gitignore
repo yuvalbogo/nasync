@@ -32,4 +32,4 @@ env/
 *.log
 .claude
 # raw traced logo source (checkerboard artifact); clean derivatives are committed
-samba_sync/assets/nasync_logo.svg
+nasync/assets/nasync_logo.svg

@@ -38,7 +38,7 @@ def _icon_source() -> Path:
     """Locate the packaged SVG icon (works for both installed and dev trees)."""
     try:
         from importlib.resources import files
-        candidate = files("samba_sync").joinpath("assets/nasync.svg")
+        candidate = files("nasync").joinpath("assets/nasync.svg")
         if candidate.is_file():
             return Path(str(candidate))
     except Exception:

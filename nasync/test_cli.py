@@ -17,8 +17,8 @@ class _FakeSMB:
 
 def _invoke_setup(tmp, input_text, seed_pairs=None):
     os.environ["XDG_CONFIG_HOME"] = tmp
-    import samba_sync.cli as cli
-    from samba_sync.config import Config
+    import nasync.cli as cli
+    from nasync.config import Config
 
     cli.SAMBAClient = _FakeSMB
     if seed_pairs:
@@ -64,7 +64,7 @@ def test_setup_keeps_existing_pairs():
 
 
 def test_list_command_does_not_shadow_builtin():
-    import samba_sync.cli as cli
+    import nasync.cli as cli
     import click
     # The CLI command must be exposed as 'list' but the module name must not
     # rebind the builtin.

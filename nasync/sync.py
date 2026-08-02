@@ -1,5 +1,5 @@
-from samba_sync.config import Config
-from samba_sync.samba import SAMBAClient
+from nasync.config import Config
+from nasync.samba import SAMBAClient
 
 
 class Syncer:

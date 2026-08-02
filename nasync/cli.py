@@ -1,11 +1,11 @@
 import os
 import click
 from getpass import getpass
-from samba_sync import __version__
-from samba_sync.config import Config
-from samba_sync.samba import SAMBAClient
-from samba_sync.sync import Syncer
-from samba_sync.watch import Watcher
+from nasync import __version__
+from nasync.config import Config
+from nasync.samba import SAMBAClient
+from nasync.sync import Syncer
+from nasync.watch import Watcher
 
 
 def _choose_share(shares):
@@ -254,7 +254,7 @@ def watch(pair):
 def tui():
     """Launch the interactive terminal UI"""
     try:
-        from samba_sync.tui import run
+        from nasync.tui import run
     except ImportError:
         click.echo(
             "The TUI needs Textual, which isn't installed. Add it with:\n"
@@ -269,7 +269,7 @@ def tui():
 @click.option("--uninstall", is_flag=True, help="Remove the launcher instead of adding it")
 def install_desktop(uninstall):
     """Add a desktop launcher + icon to your app menu (Linux)"""
-    from samba_sync import desktop
+    from nasync import desktop
     try:
         if uninstall:
             removed = desktop.uninstall()

@@ -1,6 +1,6 @@
 import tempfile
 from pathlib import Path
-from samba_sync.config import Config
+from nasync.config import Config
 
 
 def _fresh_config(tmpdir):

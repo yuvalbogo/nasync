@@ -13,7 +13,7 @@ Thank you for your interest in contributing! Here's how you can help.
 ## Making Changes
 
 - Keep changes focused and atomic
-- Test your changes locally: `python -m samba_sync.test_config`
+- Test your changes locally: `python -m nasync.test_config`
 - Follow existing code style
 - Update README if adding features
 

@@ -1,4 +1,4 @@
-<img src="samba_sync/assets/nasync_logo.png" width="96" align="right" alt="nasync logo"/>
+<img src="nasync/assets/nasync_logo.png" width="96" align="right" alt="nasync logo"/>
 
 # nasync
 
@@ -302,8 +302,8 @@ KEEP=1 ./scripts/local-test.sh   # leave the server/config up to poke at
 Pure-logic unit tests (no server required):
 
 ```bash
-python -m samba_sync.test_config
-python -m samba_sync.test_samba
+python -m nasync.test_config
+python -m nasync.test_samba
 ```
 
 ## Contributing
