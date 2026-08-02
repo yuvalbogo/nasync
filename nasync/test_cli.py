@@ -32,14 +32,14 @@ def _invoke_setup(tmp, input_text, seed_pairs=None):
 
 
 # Answers: ip, port(=default), user, password(blank), share(=default 1),
-# keep existing? , local folder, dest, name(=default), add another? -> n
+# server-name(=default), keep existing?, local, dest, pair-name(=default), add another?
 def test_setup_replaces_existing_pairs():
     """Regression: the 'don't keep' path used to crash because the `list`
     command shadowed the builtin list()."""
     with tempfile.TemporaryDirectory() as tmp:
         result, Config = _invoke_setup(
             tmp,
-            "127.0.0.1\n\nu\n\n\nn\n/tmp\n/Docs\n\nn\n",
+            "127.0.0.1\n\nu\n\n\n\nn\n/tmp\n/Docs\n\nn\n",
             seed_pairs=["Documents"],
         )
         assert result.exception is None, result.exception
@@ -53,7 +53,7 @@ def test_setup_keeps_existing_pairs():
     with tempfile.TemporaryDirectory() as tmp:
         result, Config = _invoke_setup(
             tmp,
-            "127.0.0.1\n\nu\n\n\ny\n/tmp\n/More\n\nn\n",
+            "127.0.0.1\n\nu\n\n\n\ny\n/tmp\n/More\n\nn\n",
             seed_pairs=["Documents"],
         )
         assert result.exception is None, result.exception

@@ -60,33 +60,74 @@ class SAMBAClient:
     def _stream_session(self, commands: list, on_line) -> tuple:
         """Run a single smbclient session, invoking on_line(line) as each line
         of output arrives (so callers can report live progress). Returns
-        (returncode, combined_output)."""
-        script = "\n".join(commands) + "\n"
+        (returncode, combined_output).
+
+        smbclient block-buffers stdout when it's a pipe, which makes per-file
+        progress arrive in one lump. Running it against a pseudo-terminal makes
+        it line-buffer, and we read raw bytes so nothing is held back. The
+        command script is fed on a writer thread to avoid a stdin/stdout
+        deadlock when there are many files.
+        """
+        import pty
+        import threading
+
+        script = ("\n".join(commands) + "\n").encode()
         env = os.environ.copy()
         env["PASSWD"] = self.password
+
+        master, slave = pty.openpty()
         try:
             proc = subprocess.Popen(
                 ["smbclient", self.url, "-U", self.username, "-p", str(self.port)],
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
+                stdout=slave,
+                stderr=slave,
                 env=env,
+                close_fds=True,
             )
         except FileNotFoundError:
+            os.close(master)
+            os.close(slave)
             raise Exception(
                 "smbclient not found. Install samba-client:\n"
                 "  Ubuntu/Debian: sudo apt install smbclient\n"
                 "  Fedora/RHEL:   sudo dnf install samba-client\n"
                 "  macOS:         brew install samba"
             )
+        os.close(slave)
+
+        def _feed():
+            try:
+                proc.stdin.write(script)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        writer = threading.Thread(target=_feed, daemon=True)
+        writer.start()
+
         collected = []
-        proc.stdin.write(script)
-        proc.stdin.close()
-        for line in proc.stdout:
-            line = line.rstrip("\n")
+        buffer = b""
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:  # EIO on Linux when the child exits and closes the pty
+                break
+            if not data:
+                break
+            buffer += data
+            while b"\n" in buffer:
+                raw, buffer = buffer.split(b"\n", 1)
+                line = raw.decode("utf-8", "replace").rstrip("\r")
+                collected.append(line)
+                on_line(line)
+        if buffer:
+            line = buffer.decode("utf-8", "replace").rstrip("\r")
             collected.append(line)
             on_line(line)
+
+        os.close(master)
+        writer.join(timeout=5)
         proc.wait()
         return proc.returncode, "\n".join(collected)
 
@@ -243,7 +284,7 @@ class SAMBAClient:
                 name = line[len("putting file"):].strip().split(" as ")[0].strip()
                 self._progress(done, total, os.path.basename(name), "Uploading")
 
-        returncode, output = self._stream_session(commands, on_line)
+        _rc, output = self._stream_session(commands, on_line)
         fatal = self._fatal_error(output)
         if fatal:
             raise Exception(fatal)
@@ -298,7 +339,7 @@ class SAMBAClient:
                 name = line.split(" as ", 1)[-1].split(" (")[0].strip()
                 self._progress(done, None, os.path.basename(name), "Downloading")
 
-        returncode, output = self._stream_session(commands, on_line)
+        _rc, output = self._stream_session(commands, on_line)
         fatal = self._fatal_error(output)
         if fatal:
             raise Exception(fatal)

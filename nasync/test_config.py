@@ -1,64 +1,90 @@
+import json
+import os
 import tempfile
-from pathlib import Path
 from nasync.config import Config
 
 
-def _fresh_config(tmpdir):
-    config_dir = Path(tmpdir)
-    config = Config()
-    config.config_dir = config_dir
-    config.config_file = config_dir / "config.json"
-    config.creds_file = config_dir / ".creds"
-    config._load()  # reset in-memory state to the (empty) tmp location
-    return config
+def _cfg(tmp):
+    os.environ["XDG_CONFIG_HOME"] = tmp
+    return Config()
 
 
-def test_config_creation():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config = _fresh_config(tmpdir)
+def test_server_crud():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("home", "10.0.0.5", "user", "secret", "backup", 445)
+        assert c.get_active_server_name() == "home"
+        assert [s["name"] for s in c.list_servers()] == ["home"]
 
-        config.set_server("192.0.2.10", "testuser", "testpass", "backup")
-        assert config.data["server"]["ip"] == "192.0.2.10"
-        assert config.config_file.exists()
-        # Password lives only in the creds file, never in config.json.
-        assert "testpass" not in config.config_file.read_text()
-        assert oct(config.creds_file.stat().st_mode)[-3:] == "600"
+        # password lives in .creds (0600), never in config.json
+        assert "secret" not in c.config_file.read_text()
+        assert oct(c.creds_file.stat().st_mode)[-3:] == "600"
 
-        name = config.add_pair("/home/user/docs", "/server/backups/docs", "Documents")
-        assert name == "Documents"
-        assert len(config.get_pairs()) == 1
+        sc = c.get_server_config()
+        assert sc["ip"] == "10.0.0.5" and sc["password"] == "secret" and sc["port"] == 445
 
-        pair = config.get_pair("Documents")
-        assert pair["local"] == "/home/user/docs"
-        assert pair["server"] == "/server/backups/docs"
+        # a second server; active stays until switched
+        c.add_or_update_server("work", "10.0.0.9", "u2", "pw2", "share2", 4450)
+        assert c.get_active_server_name() == "home"
+        assert c.set_active_server("work")
+        assert c.get_server_config()["ip"] == "10.0.0.9"
 
-        config.remove_pair("Documents")
-        assert len(config.get_pairs()) == 0
-
-        print("✅ test_config_creation passed")
+        # removing the active server falls back to another
+        c.remove_server("work")
+        assert c.get_active_server_name() == "home"
+        print("✅ test_server_crud passed")
 
 
-def test_duplicate_pair_rejected():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config = _fresh_config(tmpdir)
-        config.add_pair("/a", "/remote/a", "dup")
+def test_migration_from_legacy():
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["XDG_CONFIG_HOME"] = tmp
+        cfgdir = os.path.join(tmp, "nasync")
+        os.makedirs(cfgdir)
+        json.dump(
+            {"server": {"ip": "1.2.3.4", "username": "yuno", "share": "Storage", "port": 445},
+             "pairs": [{"name": "Docs", "local": "/x", "server": "/Docs"}]},
+            open(os.path.join(cfgdir, "config.json"), "w"),
+        )
+        open(os.path.join(cfgdir, ".creds"), "w").write("legacypass")
+
+        c = Config()
+        assert "server" not in c.data                       # old key gone
+        assert c.get_active_server_name() == "Storage"       # named from the share
+        sc = c.get_server_config()
+        assert sc["ip"] == "1.2.3.4" and sc["password"] == "legacypass"
+        assert [p["name"] for p in c.get_pairs()] == ["Docs"]  # pairs preserved
+        print("✅ test_migration_from_legacy passed")
+
+
+def test_pairs():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        assert c.add_pair("/home/user/docs", "/Docs", "Documents") == "Documents"
+        assert len(c.get_pairs()) == 1
         try:
-            config.add_pair("/b", "/remote/b", "dup")
+            c.add_pair("/b", "/b", "Documents")
+            raise AssertionError("expected duplicate rejection")
         except ValueError:
-            print("✅ test_duplicate_pair_rejected passed")
-            return
-        raise AssertionError("Expected ValueError for duplicate pair name")
+            pass
+        assert c.add_pair("/home/user/Photos/", "/Photos") == "Photos"
 
+        # edit: rename + change destination
+        c.update_pair("Documents", "/home/user/docs", "/DocsV2", "Docs")
+        assert c.get_pair("Documents") is None
+        assert c.get_pair("Docs")["server"] == "/DocsV2"
+        # editing to a name owned by another pair is rejected
+        try:
+            c.update_pair("Docs", "/x", "/x", "Photos")
+            raise AssertionError("expected rename collision to be rejected")
+        except ValueError:
+            pass
 
-def test_default_name_from_path():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config = _fresh_config(tmpdir)
-        name = config.add_pair("/home/user/Photos/", "/remote/photos")
-        assert name == "Photos", name
-        print("✅ test_default_name_from_path passed")
+        c.remove_pair("Docs")
+        assert [p["name"] for p in c.get_pairs()] == ["Photos"]
+        print("✅ test_pairs passed")
 
 
 if __name__ == "__main__":
-    test_config_creation()
-    test_duplicate_pair_rejected()
-    test_default_name_from_path()
+    test_server_crud()
+    test_migration_from_legacy()
+    test_pairs()

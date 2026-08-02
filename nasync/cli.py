@@ -68,6 +68,7 @@ def main():
 def init():
     """Initialize SAMBA server configuration"""
     click.echo("🔧 SAMBA Server Setup")
+    name = click.prompt("Name for this server", default="home-nas")
     ip = click.prompt("Server IP address (e.g. 192.168.1.100)")
     username = click.prompt("Username")
     password = getpass("Password: ")
@@ -75,8 +76,9 @@ def init():
     port = click.prompt("SMB port", default=445, type=int)
 
     config = Config()
-    config.set_server(ip, username, password, share, port)
-    click.echo(f"✅ Server configured: {ip}:{port}")
+    config.add_or_update_server(name, ip, username, password, share, port)
+    config.set_active_server(name)
+    click.echo(f"✅ Saved server '{name}' ({ip}:{port}) and set it active")
 
 
 @main.command()
@@ -124,8 +126,11 @@ def setup():
                 click.echo("Setup cancelled — nothing was saved.")
                 return
 
-    config.set_server(ip, username, password, share, port)
-    click.echo(f"  Saved server {ip}:{port}, share '{share}'.")
+    default_name = share or ip
+    name = click.prompt("  Name for this server", default=default_name)
+    config.add_or_update_server(name, ip, username, password, share, port)
+    config.set_active_server(name)
+    click.echo(f"  Saved server '{name}' ({ip}:{port}, share '{share}').")
 
     # ---- Step 3: sync pairs -------------------------------------------------
     click.echo("\nStep 3/3 — Sync pairs")
@@ -332,28 +337,56 @@ def test_connection():
     click.echo("✅ Connection OK — you're ready to sync.")
 
 
+@main.command(name="servers")
+def servers_cmd():
+    """List saved servers (the active one is marked *)"""
+    config = Config()
+    servers = config.list_servers()
+    active = config.get_active_server_name()
+    if not servers:
+        click.echo("No servers configured yet. Run 'nasync setup'.")
+        return
+    for s in servers:
+        mark = "* " if s["name"] == active else "  "
+        click.echo(f"{mark}{s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']})")
+
+
+@main.command()
+@click.argument("name")
+def use(name):
+    """Switch the active server"""
+    config = Config()
+    if config.set_active_server(name):
+        click.echo(f"✅ Active server: {name}")
+    else:
+        click.echo(f"❌ No server named '{name}'. See 'nasync servers'.", err=True)
+        raise SystemExit(1)
+
+
 @main.command()
 def status():
     """Show sync configuration status"""
     config = Config()
-    server_config = config.get_server_config()
+    servers = config.list_servers()
+    active = config.get_active_server_name()
     pairs = config.get_pairs()
 
-    if not server_config["ip"]:
-        click.echo("❌ Server not configured. Run 'nasync init' first.")
+    if not servers:
+        click.echo("❌ No servers configured. Run 'nasync setup' first.")
         raise SystemExit(1)
 
-    click.echo(f"\n📊 SAMBA Sync Status")
-    click.echo(f"  Server: {server_config['ip']}:{server_config['port']}/{server_config['share']}")
-    click.echo(f"  User: {server_config['username']}")
-    click.echo(f"  Pairs: {len(pairs)}")
+    click.echo("\n📊 nasync status")
+    click.echo("  Servers:")
+    for s in servers:
+        mark = "●" if s["name"] == active else "○"
+        click.echo(f"    {mark} {s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']})")
 
+    click.echo(f"\n  Sync pairs ({len(pairs)})  →  active server '{active}'")
     if pairs:
-        click.echo("\n  Configured pairs:")
         for p in pairs:
             click.echo(f"    • {p['name']}: {p['local']} → {p['server']}")
     else:
-        click.echo("\n  ⚠️  No sync pairs configured yet.")
+        click.echo("    ⚠️  none yet")
 
 
 if __name__ == "__main__":

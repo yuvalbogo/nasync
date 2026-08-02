@@ -134,11 +134,11 @@ nasync tui
 
 It's a front-end over the same engine as the CLI:
 
-- **Server** panel with a **Test connection** button — validates the IP,
-  port, and credentials, and auto-fills the **Share** picker from what the
-  server exposes
+- **Servers** list — saved, named servers; pick one to make it active. Add or
+  edit a server in a modal that tests the connection and auto-fills the share.
 - **Sync pairs** table to add/remove local→server folder mappings
-- **Sync / Dry-run / Restore** buttons, with live progress in the **Log** pane
+- **Sync / Dry-run / Restore** buttons, with a live **Progress** panel
+  (bar, percentage + ETA, an `X / N files` counter, and elapsed time)
 
 Everything it does is also available from the CLI, so scripts and the UI stay
 in sync.
@@ -170,12 +170,16 @@ Configuration is stored in:
 Example config structure:
 ```json
 {
-  "server": {
-    "ip": "192.168.1.100",
-    "username": "backup_user",
-    "share": "backup",
-    "port": 445
-  },
+  "servers": [
+    {
+      "name": "home-nas",
+      "ip": "192.168.1.100",
+      "username": "backup_user",
+      "share": "backup",
+      "port": 445
+    }
+  ],
+  "active_server": "home-nas",
   "pairs": [
     {
       "name": "Documents",
@@ -224,7 +228,9 @@ nasync sync
 | `nasync setup` | Guided first-time setup (server + share + pairs) |
 | `nasync tui` | Launch the interactive terminal UI |
 | `nasync install-desktop` | Add/remove a desktop launcher + icon (Linux) |
-| `nasync init` | Initialize server configuration (manual) |
+| `nasync init` | Initialize a server (manual) |
+| `nasync servers` | List saved servers |
+| `nasync use <name>` | Switch the active server |
 | `nasync test-connection` | Verify server, credentials, and share access |
 | `nasync add <local> <server>` | Add a sync pair |
 | `nasync list` | Show all sync pairs |

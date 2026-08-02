@@ -4,7 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Saved, named servers.** Configure multiple servers, each with a name, and
+  switch the active one instead of re-entering IP/user/share every time. New
+  CLI commands `servers` (list) and `use <name>` (switch active); `init`/`setup`
+  now name the server. Existing single-server configs migrate automatically.
+
 ### Changed
+- **TUI redesign around saved servers + native progress.** The server section
+  is now a compact list of saved servers — pick one to activate; the connection
+  fields live in an Add/Edit modal (with a Test button). This frees the left
+  column for a larger **Sync pairs** area. Transfers show a dedicated
+  **Progress** panel: a native progress bar with percentage + ETA, a live
+  `X / N files` object counter, and elapsed time. Sync pairs can now be
+  **edited** in place (Edit button / `update_pair`), not just added/removed.
 - **Project layout:** renamed the Python package `samba_sync` → `nasync` (so
   the package, command, distribution, and config dir all share one name).
   Removed redundant `setup.py` and `requirements.txt` — packaging metadata now
@@ -45,6 +58,10 @@ All notable changes to this project will be documented in this file.
 - `restore --yes/-y` to skip the confirmation prompt (for automation).
 
 ### Fixed
+- **Live progress froze after the first file** on multi-file uploads:
+  `smbclient` block-buffers its output through a pipe, so per-file lines arrived
+  in a lump. It now runs against a pseudo-terminal (line-buffered) with the
+  command script fed on a writer thread, so progress streams smoothly.
 - **Performance**: sync/restore now run in a single `smbclient` session per
   directory (native recursion) instead of opening a new SMB connection for
   every file — dramatically faster on large trees.
