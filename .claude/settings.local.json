@@ -9,7 +9,9 @@
       "Bash(samba-sync --help)",
       "Bash(pip index *)",
       "Bash(git commit -m 'Fix SAMBA client implementation and add environment variable support *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(samba-sync status *)",
+      "Bash(git commit -m 'Add enhanced CLI features and error handling *)"
     ]
   }
 }

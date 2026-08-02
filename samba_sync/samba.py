@@ -40,8 +40,19 @@ class SAMBAClient:
 
     def connect(self):
         try:
-            self._run_smbclient(["quit"])
+            result = self._run_smbclient(["quit"])
+            if "Connection refused" in result or "NT_STATUS" in result:
+                raise Exception("Could not reach server. Check IP and network connection.")
+        except FileNotFoundError:
+            raise Exception(
+                "smbclient not found. Install samba-client:\n"
+                "  Ubuntu/Debian: sudo apt install samba-client\n"
+                "  Fedora/RHEL: sudo dnf install samba-client\n"
+                "  macOS: brew install samba"
+            )
         except Exception as e:
+            if "password" in str(e).lower():
+                raise Exception("Authentication failed. Check username and password.")
             raise Exception(f"Failed to connect to SAMBA server: {e}")
 
     def disconnect(self):
