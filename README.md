@@ -31,6 +31,19 @@ pip install nasync
 
 **⏱️ 5-minute setup guide:** See [QUICKSTART.md](QUICKSTART.md)
 
+### Easiest way: guided setup
+
+One command walks you through everything — server details with a **live
+connection test**, **picking your share from an auto-detected list**, and
+adding your sync folders:
+
+```bash
+nasync setup
+```
+
+That's all most people need. Prefer to configure piece by piece? The manual
+steps below do exactly the same thing.
+
 ### 1. Initialize Server Configuration
 
 ```bash
@@ -162,7 +175,8 @@ nasync sync
 
 | Command | Description |
 |---------|-------------|
-| `nasync init` | Initialize server configuration |
+| `nasync setup` | Guided first-time setup (server + share + pairs) |
+| `nasync init` | Initialize server configuration (manual) |
 | `nasync test-connection` | Verify server, credentials, and share access |
 | `nasync add <local> <server>` | Add a sync pair |
 | `nasync list` | Show all sync pairs |

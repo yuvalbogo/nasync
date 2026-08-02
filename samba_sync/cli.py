@@ -1,3 +1,4 @@
+import os
 import click
 from getpass import getpass
 from samba_sync import __version__
@@ -5,6 +6,55 @@ from samba_sync.config import Config
 from samba_sync.samba import SAMBAClient
 from samba_sync.sync import Syncer
 from samba_sync.watch import Watcher
+
+
+def _choose_share(shares):
+    """Let the user pick a share by number or name; fall back to manual entry."""
+    if not shares:
+        click.echo("  (couldn't auto-list shares — the server may not allow it)")
+        return click.prompt("  Share name")
+    click.echo("  Shares found on the server:")
+    for i, s in enumerate(shares, 1):
+        click.echo(f"    {i}) {s}")
+    while True:
+        choice = click.prompt("  Pick a share (number or name)", default="1").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(shares):
+            return shares[int(choice) - 1]
+        if choice in shares:
+            return choice
+        click.echo("  Invalid choice — enter a listed number or name.")
+
+
+def _add_pairs_interactive(config, share):
+    """Prompt for one or more local→server sync pairs and save them."""
+    while True:
+        local = click.prompt("  Local folder to sync")
+        local_abs = os.path.abspath(os.path.expanduser(local))
+        if os.path.isdir(local_abs):
+            click.echo(f"    exists ✓  ({local_abs})")
+        elif not click.confirm(f"    '{local_abs}' doesn't exist yet — add it anyway?",
+                               default=False):
+            continue
+
+        dest = click.prompt("  Destination path under the share (e.g. /Docs)")
+        first = dest.strip("/").split("/")[0] if dest.strip("/") else ""
+        if first == share:
+            click.echo(
+                f"    ⚠️  That starts with the share name '{share}'. Paths are "
+                f"relative to the share root, so this would nest under "
+                f"'{share}/{share}/…' — drop the leading '{share}/' unless you mean it."
+            )
+
+        default_name = os.path.basename(local_abs.rstrip("/")) or "root"
+        name = click.prompt("  Name for this pair", default=default_name)
+        try:
+            saved = config.add_pair(local_abs, dest, name)
+            click.echo(f"    ✓ added '{saved}':  {local_abs} → {dest}")
+        except ValueError as e:
+            click.echo(f"    ✗ {e}")
+
+        if not click.confirm("  Add another pair?", default=False):
+            break
 
 
 @click.group()
@@ -27,6 +77,70 @@ def init():
     config = Config()
     config.set_server(ip, username, password, share, port)
     click.echo(f"✅ Server configured: {ip}:{port}")
+
+
+@main.command()
+def setup():
+    """Guided first-time setup: server, share, and sync pairs (recommended)"""
+    config = Config()
+    click.echo("🚀 nasync setup — let's get you syncing.\n")
+
+    # ---- Step 1: server details, with a live connection test ----------------
+    click.echo("Step 1/3 — Server")
+    shares = []
+    while True:
+        ip = click.prompt("  Server IP address (e.g. 192.168.1.100)")
+        port = click.prompt("  SMB port", default=445, type=int)
+        username = click.prompt("  Username")
+        password = click.prompt("  Password (blank for guest)",
+                                default="", hide_input=True, show_default=False)
+
+        click.echo("  → Testing connection...", nl=False)
+        probe = SAMBAClient(ip, username, password, "", port=port)
+        try:
+            shares = probe.list_shares()   # proves IP + auth, and finds shares
+            click.echo(" ✓ connected")
+            break
+        except Exception as e:
+            click.echo(" ✗")
+            click.echo(f"    {e}")
+            if not click.confirm("  Try again?", default=True):
+                click.echo("Setup cancelled — nothing was saved.")
+                return
+
+    # ---- Step 2: pick the share, and confirm it's actually accessible -------
+    click.echo("\nStep 2/3 — Share")
+    while True:
+        share = _choose_share(shares)
+        click.echo(f"  → Checking access to '{share}'...", nl=False)
+        try:
+            SAMBAClient(ip, username, password, share, port=port).connect()
+            click.echo(" ✓")
+            break
+        except Exception as e:
+            click.echo(" ✗")
+            click.echo(f"    {e}")
+            if not click.confirm("  Pick a different share?", default=True):
+                click.echo("Setup cancelled — nothing was saved.")
+                return
+
+    config.set_server(ip, username, password, share, port)
+    click.echo(f"  Saved server {ip}:{port}, share '{share}'.")
+
+    # ---- Step 3: sync pairs -------------------------------------------------
+    click.echo("\nStep 3/3 — Sync pairs")
+    existing = config.get_pairs()
+    if existing:
+        click.echo(f"  You already have {len(existing)} pair(s) configured.")
+        if not click.confirm("  Keep them?", default=True):
+            for p in list(existing):
+                config.remove_pair(p["name"])
+            click.echo("  Cleared existing pairs.")
+    _add_pairs_interactive(config, share)
+
+    click.echo("\n✅ All set! Next steps:")
+    click.echo("   nasync status     # review your configuration")
+    click.echo("   nasync sync       # push your folders to the server")
 
 
 @main.command()

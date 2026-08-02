@@ -37,6 +37,17 @@ pip install -e .
 
 ## Configuration
 
+### Fastest: one guided command
+
+```bash
+nasync setup
+```
+
+This walks you through the server details (testing the connection as you go),
+lets you pick your share from an auto-detected list, and adds your sync
+folders — then you can jump straight to [Usage](#usage). The manual steps
+below are the same thing, broken out.
+
 ### 1. Initialize your server
 
 ```bash

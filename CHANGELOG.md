@@ -10,6 +10,9 @@ All notable changes to this project will be documented in this file.
   (`~/.config/nasync/`). The internal Python package remains `samba_sync`.
 
 ### Added
+- `setup` command: a guided first-run wizard that collects server details with
+  a live connection test, auto-detects and lets you pick a share, and adds sync
+  pairs — reusing the same validation as `test-connection`.
 - `test-connection` command: verifies the server is reachable, credentials are
   accepted, and the configured share exists — and lists available shares when
   the configured one is wrong.
