@@ -1,5 +1,5 @@
 from nasync.config import Config
-from nasync.samba import SAMBAClient
+from nasync.samba import SAMBAClient, SyncCancelled
 
 
 class Syncer:
@@ -11,10 +11,15 @@ class Syncer:
     TUI, ...) can decide how to react.
     """
 
-    def __init__(self, reporter=None, progress=None):
+    def __init__(self, reporter=None, progress=None, byte_progress=None,
+                 cancel_event=None):
         self.config = Config()
         self._report = reporter or print
         self._progress = progress
+        # Optional per-byte progress and a threading.Event for cancellation;
+        # front-ends that don't supply them behave exactly as before.
+        self._byte_progress = byte_progress
+        self._cancel = cancel_event
 
     def _prepare(self, pair_name):
         """Validate config and return (client, pairs) ready to transfer."""
@@ -40,6 +45,8 @@ class Syncer:
             port=server_config.get("port", 445),
             reporter=self._report,
             progress=self._progress,
+            byte_progress=self._byte_progress,
+            cancel_event=self._cancel,
         )
         return client, pairs
 
@@ -56,6 +63,7 @@ class Syncer:
 
         ok = 0
         failed = 0
+        cancelled = False
         totals = {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0}
         try:
             # A push dry-run only reads local disk, so don't require the server.
@@ -78,12 +86,19 @@ class Syncer:
                         totals[key] += stats.get(key, 0)
                     self._report(f"✅ {pair['name']} done")
                     ok += 1
+                except SyncCancelled:
+                    # A cancel is a deliberate user action, not a failure —
+                    # stop the whole run rather than moving to the next pair.
+                    cancelled = True
+                    break
                 except Exception as e:
                     self._report(f"❌ Failed on {pair['name']}: {e}")
                     failed += 1
         finally:
             client.disconnect()
 
-        if failed:
+        if cancelled:
+            self._report("\n⏹️  Cancelled.")
+        elif failed:
             self._report(f"\n⚠️  Completed with {failed} error(s)")
-        return {"ok": ok, "failed": failed, **totals}
+        return {"ok": ok, "failed": failed, "cancelled": cancelled, **totals}

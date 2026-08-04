@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nasync"
-version = "0.2.0"
+# Single source of truth: nasync/__init__.py:__version__ (see [tool.setuptools.dynamic])
+dynamic = ["version"]
 description = "NASync — sync your local folders to a SAMBA home NAS, with class"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -30,6 +31,9 @@ dependencies = [
     "click==8.1.7",
     "watchdog==3.0.0",
     "appdirs==1.4.4",
+    # SMB 2/3 transport. Deliberately not pinned exactly: it carries the crypto
+    # and network handling, so patch releases should reach users unimpeded.
+    "smbprotocol>=1.12",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +58,9 @@ nasync = "nasync.cli:main"
 
 [tool.setuptools]
 packages = ["nasync"]
+
+[tool.setuptools.dynamic]
+version = {attr = "nasync.__version__"}
 
 [tool.setuptools.package-data]
 nasync = ["assets/nasync.svg"]
