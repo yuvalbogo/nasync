@@ -60,7 +60,7 @@ def _add_pairs_interactive(config, share):
 @click.group()
 @click.version_option(version=__version__, prog_name="nasync")
 def main():
-    """SAMBA Sync Auto - Automatic sync tool for SAMBA home NAS backup"""
+    """NASync — sync your local folders to a SAMBA home NAS, with class."""
     pass
 
 

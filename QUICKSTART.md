@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get SAMBA Sync Auto running in 5 minutes.
+Get NASync running in 5 minutes.
 
 ## Installation
 
@@ -22,7 +22,7 @@ sudo dnf install python3-pip samba-client
 brew install python samba
 ```
 
-### 2. Install SAMBA Sync Auto
+### 2. Install NASync
 
 ```bash
 pip install git+https://github.com/YuvalBogo/nasync.git

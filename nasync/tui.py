@@ -18,7 +18,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button, DataTable, Footer, Header, Input, Label, ListItem, ListView,
-    ProgressBar, RichLog, Rule, Select,
+    ProgressBar, Select,
 )
 
 from nasync.config import Config
@@ -194,8 +194,9 @@ class NasyncApp(App):
     CSS = """
     Screen { layout: horizontal; background: $background; }
 
-    #left  { width: 55%; padding: 1 1 1 2; }
-    #right { width: 45%; padding: 1 2 1 1; }
+    /* two equal, symmetric columns */
+    #left  { width: 1fr; padding: 1 1 1 2; }
+    #right { width: 1fr; padding: 1 2 1 1; }
 
     .section {
         border: round $primary 60%;
@@ -206,36 +207,34 @@ class NasyncApp(App):
         margin-bottom: 1;
         height: auto;
     }
+    /* the two lower cards fill and match each other -> symmetric */
     #pairs-section { height: 1fr; }
-    #log-section { height: 1fr; }
+    #progress-section { height: 1fr; }
 
     .row { height: auto; }
     Input { width: 1fr; margin-bottom: 1; }
 
     #servers { height: auto; max-height: 6; background: $surface; border: none; }
-    #status { margin-top: 1; }
-    #pairs { height: 1fr; min-height: 8; }
+    #status { margin-top: 1; height: auto; }
+    #pairs { height: 1fr; min-height: 6; }
 
     .buttons { height: auto; align: left middle; margin-top: 1; }
     Button { margin: 0 1 0 0; border: none; height: 3; min-width: 8; }
 
-    /* progress lives at the top of the Activity (log) card */
-    #progress-box {
-        height: auto;
-        background: $boost;
-        border: round $primary 40%;
-        padding: 1 2;
-        margin-bottom: 1;
-    }
-    #current { height: 1; text-style: bold; }
-    #bar { margin: 1 0 0 0; width: 1fr; }
+    /* progress hero — centred inside its card */
+    #prog-body { height: 1fr; align: center middle; }
+    #prog-icon { width: 1fr; height: auto; text-align: center; color: $accent; }
+    #prog-current { width: 1fr; height: auto; text-align: center; text-style: bold;
+                    margin-bottom: 1; }
+    #bar { width: 1fr; margin-bottom: 1; }
     #bar Bar { width: 1fr; }
     #bar Bar > .bar--bar { color: $accent; }
     #bar Bar > .bar--complete { color: $success; }
     #bar PercentageStatus { color: $accent; text-style: bold; }
-    #counter { color: $text-muted; height: 1; }
-    #log-divider { color: $primary 30%; margin: 0; }
-    #log { height: 1fr; background: $surface; }
+    #prog-counter { width: 1fr; height: auto; text-align: center; color: $text-muted; }
+    #prog-stats { width: 1fr; height: auto; text-align: center; margin-top: 1; }
+    #prog-status { width: 1fr; height: auto; text-align: center; margin-top: 1;
+                   color: $text-muted; }
 
     #dialog {
         background: $surface;
@@ -287,13 +286,14 @@ class NasyncApp(App):
                     yield Button("Restore ◀", variant="warning", id="btn-restore")
                 with Horizontal(classes="buttons"):
                     yield Button("Auto-sync: Off", id="btn-auto")
-            with self._section("Activity", id="log-section"):
-                with Vertical(id="progress-box"):
-                    yield Label("[dim]Idle[/dim]", id="current")
+            with self._section("Progress", id="progress-section"):
+                with Vertical(id="prog-body"):
+                    yield Label("◇", id="prog-icon")
+                    yield Label("[dim]Idle[/dim]", id="prog-current")
                     yield ProgressBar(id="bar", total=100, show_eta=True)
-                    yield Label("", id="counter")
-                yield Rule(id="log-divider")
-                yield RichLog(id="log", markup=True, wrap=True)
+                    yield Label("", id="prog-counter")
+                    yield Label("", id="prog-stats")
+                    yield Label("[dim]Pick a server, then Sync.[/dim]", id="prog-status")
         yield Footer()
 
     # ------------------------------------------------------------------ #
@@ -306,7 +306,6 @@ class NasyncApp(App):
         table.cursor_type = "row"
         self._refresh_servers()
         self._refresh_pairs()
-        self._log("[dim]Ready. Pick a server (or Add one), then Sync.[/dim]")
 
     def _refresh_servers(self) -> None:
         lv = self.query_one("#servers", ListView)
@@ -333,7 +332,8 @@ class NasyncApp(App):
     # Helpers
     # ------------------------------------------------------------------ #
     def _log(self, message: str) -> None:
-        self.query_one("#log", RichLog).write(message)
+        # The single status line under the progress hero shows the latest message.
+        self.query_one("#prog-status", Label).update(message.strip() or " ")
 
     def _thread_log(self, message: str) -> None:
         self.call_from_thread(self._log, message)
@@ -361,24 +361,37 @@ class NasyncApp(App):
     def _reset_progress(self) -> None:
         self._t0 = time.monotonic()
         self.query_one("#bar", ProgressBar).update(total=100, progress=0)
-        self.query_one("#current", Label).update("[b]Starting…[/b]")
-        self.query_one("#counter", Label).update("")
+        self.query_one("#prog-icon", Label).update("[$accent]⟳[/]")
+        self.query_one("#prog-current", Label).update("[b]Starting…[/b]")
+        self.query_one("#prog-counter", Label).update("")
+        self.query_one("#prog-stats", Label).update("")
 
     def _on_progress(self, done: int, total, name: str, verb: str) -> None:
         self.query_one("#bar", ProgressBar).update(
             total=total if total else None, progress=done)
         icon = "↑" if verb == "Uploading" else "↓"
-        self.query_one("#current", Label).update(f"[$accent]{icon}[/] {verb} [b]{name}[/b]")
+        self.query_one("#prog-icon", Label).update(f"[$accent]{icon}[/]")
+        self.query_one("#prog-current", Label).update(f"{verb} [b]{name}[/b]")
         elapsed = self._fmt_elapsed(time.monotonic() - getattr(self, "_t0", time.monotonic()))
         objs = f"{done} / {total} files" if total else f"{done} files"
-        self.query_one("#counter", Label).update(f"{objs}  ·  {elapsed} elapsed")
+        self.query_one("#prog-counter", Label).update(f"{objs}  ·  {elapsed} elapsed")
 
     def _finish_progress(self, result: dict) -> None:
-        if result.get("failed"):
-            self.query_one("#current", Label).update(
-                f"[yellow]Completed with {result['failed']} error(s)[/yellow]")
+        failed = result.get("failed", 0)
+        if failed:
+            self.query_one("#prog-icon", Label).update("[yellow]![/]")
+            self.query_one("#prog-current", Label).update(
+                f"[yellow]Completed with {failed} error(s)[/yellow]")
         else:
-            self.query_one("#current", Label).update("[green]✓ Complete[/green]")
+            self.query_one("#prog-icon", Label).update("[green]✓[/]")
+            self.query_one("#prog-current", Label).update("[green]Complete[/green]")
+        # a compact stats line: uploaded · unchanged · removed
+        up = result.get("transferred", 0)
+        same = result.get("skipped", 0)
+        gone = result.get("deleted", 0)
+        self.query_one("#prog-stats", Label).update(
+            f"[green]↑ {up}[/] uploaded    [dim]✓ {same}[/] unchanged    "
+            f"[red]✗ {gone}[/] removed")
 
     def _thread_progress(self, done, total, name, verb) -> None:
         self.call_from_thread(self._on_progress, done, total, name, verb)
@@ -599,7 +612,7 @@ class NasyncApp(App):
             return
         self._reset_progress()
         verb = {"push": "Sync", "pull": "Restore"}[direction]
-        self._log(f"\n[b]▶ {verb}{' (dry-run)' if dry_run else ''}…[/b]")
+        self._log(f"[b]▶ {verb}{' (dry-run)' if dry_run else ''}…[/b]")
         self._worker_transfer(direction, dry_run)
 
     @work(thread=True, exclusive=True)
@@ -611,11 +624,14 @@ class NasyncApp(App):
             else:
                 result = syncer.restore_pair(dry_run=dry_run)
         except Exception as e:
-            self.call_from_thread(self._log, f"[red]✗ {e}[/red]")
+            self.call_from_thread(self._fail_progress, str(e))
             return
-        summary = f"[green]Done[/green] — {result['ok']} ok, {result['failed']} failed"
-        self.call_from_thread(self._log, summary)
         self.call_from_thread(self._finish_progress, result)
+
+    def _fail_progress(self, message: str) -> None:
+        self.query_one("#prog-icon", Label).update("[red]✗[/]")
+        self.query_one("#prog-current", Label).update("[red]Failed[/red]")
+        self._log(f"[red]{message}[/red]")
 
 
 def run() -> None:

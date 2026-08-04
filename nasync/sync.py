@@ -56,6 +56,7 @@ class Syncer:
 
         ok = 0
         failed = 0
+        totals = {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0}
         try:
             # A push dry-run only reads local disk, so don't require the server.
             if not dry_run:
@@ -69,10 +70,12 @@ class Syncer:
                     self._report(f"  From Server: {pair['server']}")
                     self._report(f"  To Local:    {pair['local']}")
                 try:
-                    client.sync_directory(
+                    stats = client.sync_directory(
                         pair["local"], pair["server"],
                         direction=direction, dry_run=dry_run, mirror=mirror,
                     )
+                    for key in totals:
+                        totals[key] += stats.get(key, 0)
                     self._report(f"✅ {pair['name']} done")
                     ok += 1
                 except Exception as e:
@@ -83,4 +86,4 @@ class Syncer:
 
         if failed:
             self._report(f"\n⚠️  Completed with {failed} error(s)")
-        return {"ok": ok, "failed": failed}
+        return {"ok": ok, "failed": failed, **totals}

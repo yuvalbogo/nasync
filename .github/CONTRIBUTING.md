@@ -1,4 +1,4 @@
-# Contributing to SAMBA Sync Auto
+# Contributing to NASync
 
 Thank you for your interest in contributing! Here's how you can help.
 

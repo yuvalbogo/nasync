@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nasync"
-version = "0.1.0"
-description = "Automatic SAMBA-based sync tool for home NAS backup"
+version = "0.2.0"
+description = "NASync — sync your local folders to a SAMBA home NAS, with class"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}

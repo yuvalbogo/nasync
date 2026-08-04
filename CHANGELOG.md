@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-03
 
 ### Added
 - **Incremental mirror sync.** `sync` now uploads only new/changed files
@@ -34,9 +34,13 @@ All notable changes to this project will be documented in this file.
 - **TUI: live per-file progress.** Push/pull now stream `smbclient` output and
   emit a per-file progress callback, so the TUI shows a dnf-style progress bar
   with an `X/total` counter and the current file name.
-- **TUI: refined layout.** Section titles are embedded in rounded borders with
-  consistent padding/spacing, and the **Actions** panel moved to the right
-  column, directly above the **Log**.
+- **TUI: refined, symmetric layout.** Two equal columns (Servers + Sync pairs
+  on the left; Actions + Progress on the right), section titles embedded in
+  rounded borders. The verbose log pane was removed in favour of a centred
+  **Progress** hero — colored bar, current file, `X / N files` + elapsed, and a
+  final `↑ uploaded · ✓ unchanged · ✗ removed` summary.
+- **Branding:** the app is now **NASync — "Sync your NAS with class"** (shown in
+  the README and the TUI header). The command stays `nasync`.
 
 ### Added
 - **Desktop launcher** (`nasync install-desktop`): installs a freedesktop
