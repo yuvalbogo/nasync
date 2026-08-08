@@ -22,9 +22,21 @@ backup and file sync.
   missed while asleep or away
 - 🔔 **Notifications**: background syncs report what they did, and a scheduled
   run that couldn't happen says so — see [Notifications](#notifications)
-- 🖥️ **Cross-Platform**: Works on Linux (Fedora, Ubuntu, etc.) and macOS
-- 🔐 **Secure**: Credentials stored locally with restricted permissions
-- 📦 **Lightweight**: Minimal dependencies, low memory footprint
+- 🗂️ **Browse the server**: pick a destination by looking at the share instead
+  of typing a path — see [Browsing the server](#browsing-the-server)
+- 📊 **See what's using space**: biggest folders first with drill-down, plus a
+  duplicate finder — see [What's using space](#whats-using-space-on-the-nas)
+- 🔎 **Know your server**: protocol negotiated, encryption state, free space
+  and shares — see [What your server is](#what-your-server-is)
+- 🔐 **Passwords encrypted at rest**: AES-GCM under a key from your keyring or
+  the desktop portal, never stored by NASync itself — and on a machine with
+  neither, it says so rather than implying protection it doesn't have
+- 🔒 **Encrypted transfers**: optional SMB 3 encryption per server, which
+  refuses to connect rather than quietly falling back to plaintext
+- 🖥️ **Linux first**: Fedora, Ubuntu, Debian and friends. The CLI runs on
+  macOS too; the desktop app needs GTK4 + libadwaita and so is Linux-only
+- 📦 **Lightweight**: no Samba tooling to install — SMB 2/3 is spoken directly
+  from Python
 
 ## Installation
 
@@ -369,14 +381,16 @@ PyGObject, GTK4 and libadwaita are system packages, not pip installs.
 
 ```bash
 sudo dnf install python3-gobject gtk4 libadwaita
-pipx install --system-site-packages nasync
+pipx install --system-site-packages \
+  git+https://github.com/YuvalBogo/nasync.git
 ```
 
 **Ubuntu** (24.04 LTS and newer) **/ Debian 13+**:
 
 ```bash
 sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 pipx
-pipx install --system-site-packages nasync
+pipx install --system-site-packages \
+  git+https://github.com/YuvalBogo/nasync.git
 ```
 
 Then add the app to your menu:
@@ -778,7 +792,7 @@ Details worth knowing:
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - A SAMBA share accessible on your network, with read/write permissions
 - No external SMB tooling — `smbprotocol` is installed by pip and speaks SMB
   2/3 directly

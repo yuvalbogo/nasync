@@ -7,7 +7,7 @@ Get NASync running in 5 minutes.
 ### 1. Install NASync
 
 NASync speaks SMB directly from Python, so there's no Samba tooling to install
-first — just Python 3.8+ and pip.
+first — just Python 3.10+ and pip.
 
 ```bash
 pip install git+https://github.com/YuvalBogo/nasync.git
@@ -30,11 +30,13 @@ distribution. Fedora 40+ and Ubuntu 24.04 LTS+ both qualify:
 ```bash
 # Fedora
 sudo dnf install python3-gobject gtk4 libadwaita
-pipx install --system-site-packages nasync
+pipx install --system-site-packages \
+  git+https://github.com/YuvalBogo/nasync.git
 
 # Ubuntu / Debian
 sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 pipx
-pipx install --system-site-packages nasync
+pipx install --system-site-packages \
+  git+https://github.com/YuvalBogo/nasync.git
 ```
 
 Then put it in your application menu:

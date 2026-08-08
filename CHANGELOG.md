@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.16.2] - 2026-08-08
+
+Documentation and packaging corrections found by reading the whole of README,
+QUICKSTART and the build files against what the code actually does.
+
+### Fixed
+- **The declared Python floor was wrong, and would have failed to install.**
+  `requires-python` said 3.8, but `secretstorage>=3.5` and current
+  `smbprotocol` both require **3.10**, so `pip install` on 3.8 or 3.9 could
+  never have resolved. The floor, the classifiers, the black target and the
+  README/QUICKSTART claims now all say 3.10.
+- **CI tested Python 3.8 and 3.9**, which for the same reason could only ever
+  have failed at the install step. The matrix is now 3.10–3.12.
+- **CI still installed the `smbclient` binary** on both runners, unused since
+  0.16.0 removed the last subprocess. Dropped.
+- **`pipx install nasync` was documented but NASync isn't on PyPI yet**, so the
+  desktop-app setup instructions in both README and QUICKSTART installed
+  nothing. They now use the git URL, matching the step above them.
+
+### Changed
+- **The feature list was five releases out of date** and undersold the security
+  work — "credentials stored locally with restricted permissions" had been
+  describing encrypted-at-rest storage since 0.11.0. It now covers browsing the
+  server, storage insight, server info, credential encryption and SMB 3
+  transfers.
+- The cross-platform claim is now precise: Linux first, with the CLI also
+  running on macOS and the desktop app Linux-only, rather than "works on Linux
+  and macOS" implying the GUI does too.
+- **Screenshots regenerated.** The old set predated the TUI removal, the
+  Storage panel, the Security section and the encryption switch. The generator
+  now uses an invented identity throughout and runs with a throwaway `HOME`, so
+  nothing about the machine that produced them can appear; the README shows
+  three of them.
+
 ## [0.16.1] - 2026-08-08
 
 Fixes from a quality review and a code review run over 0.11.0–0.16.0. The first
