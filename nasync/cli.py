@@ -1,11 +1,13 @@
 import os
+import sys
 import click
 from getpass import getpass
 from nasync import __version__
-from nasync.config import Config
-from nasync.samba import SAMBAClient
-from nasync.sync import Syncer
-from nasync.watch import Watcher
+from nasync.core.config import SYNC_MODES, Config
+from nasync.core.samba import SAMBAClient
+from nasync.core.sync import Syncer
+from nasync.format import format_bytes, format_volume
+from nasync.system import notify, service
 
 
 def _choose_share(shares):
@@ -74,9 +76,13 @@ def init():
     password = getpass("Password: ")
     share = click.prompt("Share name", default="backup")
     port = click.prompt("SMB port", default=445, type=int)
+    encrypt = click.confirm(
+        "Encrypt the connection? (needs SMB 3; slower on older NAS hardware)",
+        default=False)
 
     config = Config()
-    config.add_or_update_server(name, ip, username, password, share, port)
+    config.add_or_update_server(name, ip, username, password, share, port,
+                                encrypt)
     config.set_active_server(name)
     click.echo(f"✅ Saved server '{name}' ({ip}:{port}) and set it active")
 
@@ -128,7 +134,13 @@ def setup():
 
     default_name = share or ip
     name = click.prompt("  Name for this server", default=default_name)
-    config.add_or_update_server(name, ip, username, password, share, port)
+    # Re-running setup against a server that already exists must not turn its
+    # encryption off. `add_or_update_server` defaults the flag to False, so
+    # omitting it here would silently downgrade a configured NAS to plaintext
+    # transfers — the opposite of what `nasync encryption` promises.
+    existing = config.get_server(name)
+    config.add_or_update_server(name, ip, username, password, share, port,
+                                encrypt=bool(existing and existing["encrypt"]))
     config.set_active_server(name)
     click.echo(f"  Saved server '{name}' ({ip}:{port}, share '{share}').")
 
@@ -152,71 +164,91 @@ def setup():
 @click.argument("local_path")
 @click.argument("server_path")
 @click.option("--name", default=None, help="Custom name for this pair")
-def add(local_path, server_path, name):
-    """Add a new sync pair"""
+@click.option("--server", default=None,
+              help="Attach to this server instead of the active one")
+def add(local_path, server_path, name, server):
+    """Add a sync pair to the active server (or --server)"""
     config = Config()
     try:
-        pair_name = config.add_pair(local_path, server_path, name)
+        pair_name = config.add_pair(local_path, server_path, name, server=server)
     except ValueError as e:
         click.echo(f"❌ {e}", err=True)
         raise SystemExit(1)
-    click.echo(f"✅ Added sync pair: {pair_name}")
-    import os
+    owner = server or config.get_active_server_name()
+    click.echo(f"✅ Added sync pair '{pair_name}' to server '{owner}'")
     if not os.path.isdir(os.path.expanduser(local_path)):
         click.echo(f"⚠️  Note: local path does not exist yet: {local_path}")
 
 
 @main.command(name="list")
 @click.option("--pair", default=None, help="Specific pair name to list")
-def list_pairs(pair):
-    """List all configured sync pairs"""
+@click.option("--server", default=None, help="List another server's pairs")
+@click.option("--all", "show_all", is_flag=True, help="List every server's pairs")
+def list_pairs(pair, server, show_all):
+    """List sync pairs for the active server (each server has its own)"""
     config = Config()
-    pairs = config.get_pairs()
-
-    if not pairs:
-        click.echo("No sync pairs configured yet.")
+    targets = ([s["name"] for s in config.list_servers()] if show_all
+               else [server or config.get_active_server_name()])
+    if not any(targets):
+        click.echo("No servers configured yet. Run 'nasync setup'.")
         return
 
-    server_config = config.get_server_config()
-    click.echo(f"\n📋 Server: {server_config['ip']} / {server_config['share']}")
-    click.echo("Sync Pairs:")
-
-    for p in pairs:
-        click.echo(f"  {p['name']}")
-        click.echo(f"    Local:  {p['local']}")
-        click.echo(f"    Server: {p['server']}")
+    for name in targets:
+        pairs = config.get_pairs(name)
+        details = config.get_server(name, with_password=False)
+        location = f"{details['ip']} / {details['share']}" if details else "?"
+        click.echo(f"\n📋 {name}  ({location})")
+        if not pairs:
+            click.echo("  No sync pairs yet.")
+            continue
+        for p in pairs:
+            click.echo(f"  {p['name']}")
+            click.echo(f"    Local:  {p['local']}")
+            click.echo(f"    Server: {p['server']}")
 
 
 @main.command()
 @click.argument("name")
-def remove(name):
-    """Remove a sync pair"""
+@click.option("--server", default=None,
+              help="Remove from this server instead of the active one")
+def remove(name, server):
+    """Remove a sync pair from the active server (or --server)"""
     config = Config()
-    if not config.get_pair(name):
-        click.echo(f"❌ Pair '{name}' not found.", err=True)
+    owner = server or config.get_active_server_name()
+    if not config.get_pair(name, owner):
+        click.echo(f"❌ Pair '{name}' not found on server '{owner}'.", err=True)
         raise SystemExit(1)
-    config.remove_pair(name)
-    click.echo(f"✅ Removed sync pair: {name}")
+    config.remove_pair(name, server=owner)
+    click.echo(f"✅ Removed sync pair '{name}' from '{owner}'")
 
 
 @main.command()
 @click.option("--pair", default=None, help="Specific pair name to sync")
 @click.option("--dry-run", is_flag=True, help="Show what would be synced without doing it")
-@click.option("--no-delete", is_flag=True,
-              help="Don't remove server files that were deleted locally (no mirror)")
-def sync(pair, dry_run, no_delete):
-    """Sync local directories to the server (incremental mirror)
+@click.option("--mode", type=click.Choice(SYNC_MODES), default=None,
+              help="Override the saved sync mode for this run")
+@click.option("--no-delete", is_flag=True, help="Alias for --mode update")
+def sync(pair, dry_run, mode, no_delete):
+    """Sync local directories to the server (incremental)
 
-    Only new or changed files are uploaded; unchanged files are skipped, and
-    files removed locally are deleted on the server. Use --no-delete to keep
-    server-only files.
+    Only new or changed files are uploaded and unchanged ones are skipped, in
+    both modes. What differs is server-only files: 'mirror' deletes them so the
+    server matches your folders exactly, 'update' leaves them in place. The
+    saved default comes from 'nasync mode'.
     """
     if dry_run:
         click.echo("🔍 Dry-run mode (no files will be transferred)")
 
+    # --mode wins over the older --no-delete when both are given.
+    mirror = None
+    if mode is not None:
+        mirror = mode == "mirror"
+    elif no_delete:
+        mirror = False
+
     syncer = Syncer()
     try:
-        result = syncer.sync_pair(pair, dry_run=dry_run, mirror=not no_delete)
+        result = syncer.sync_pair(pair, dry_run=dry_run, mirror=mirror)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
@@ -230,7 +262,11 @@ def sync(pair, dry_run, no_delete):
 @click.option("--dry-run", is_flag=True, help="Show what would be restored without doing it")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
 def restore(pair, dry_run, yes):
-    """Restore local directories from server backup"""
+    """Restore local directories from server backup
+
+    Adds and overwrites local files only — local files the server doesn't have
+    are never deleted, whichever sync mode is set.
+    """
     if dry_run:
         click.echo("🔍 Dry-run mode (no files will be transferred)")
     elif not yes:
@@ -250,35 +286,542 @@ def restore(pair, dry_run, yes):
     click.echo("\n✅ Restore completed!")
 
 
+_MODE_HELP = {
+    "mirror": "the server is made to match your local folders exactly; "
+              "server-only files are deleted",
+    "update": "new and changed files are copied; nothing is deleted on the server",
+}
+
+
+@main.command()
+@click.option("--reset", is_flag=True,
+              help="Discard the saved passwords so they can be entered again")
+@click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
+def credentials(reset, yes):
+    """Show how saved passwords are protected, or discard them
+
+    --reset is the way out of a `.creds` that can't be opened — a keyring whose
+    key was deleted, or a file carried over from a different install. NASync
+    refuses to save over passwords it can't read, so without this the only
+    recovery would itself be blocked.
+    """
+    config = Config()
+    click.echo(f"Saved passwords: {config.credentials_status()}")
+    problem = config.check_credentials()
+    if problem:
+        click.echo(f"🔒 {problem}")
+
+    if not reset:
+        if problem:
+            click.echo("\n   Unlock your keyring and try again, or discard them "
+                       "with: nasync credentials --reset")
+        return
+
+    count = len(config.list_servers())
+    if not yes and not click.confirm(
+            f"\nDiscard the saved password for {count} server(s)? "
+            f"You'll need to enter them again", default=False):
+        click.echo("Nothing was changed.")
+        return
+
+    config.reset_credentials()
+    click.echo("✅ Saved passwords discarded. Re-enter them with "
+               "'nasync init' or in the desktop app.")
+
+
+def _connected_client(server_name=None):
+    """A connected client for the named server, or exit with a clear message."""
+    config = Config()
+    name = server_name or config.get_active_server_name()
+    server = config.get_server(name) if name else None
+    if not server or not server.get("ip") or not server.get("share"):
+        click.echo("❌ No server configured. Run 'nasync setup' first.", err=True)
+        raise SystemExit(1)
+    client = SAMBAClient(server["ip"], server["username"],
+                         server.get("password", ""), server["share"],
+                         port=server.get("port", 445),
+                         encrypt=server.get("encrypt", False))
+    try:
+        client.connect()
+    except Exception as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+    return client, server
+
+
+def _scan_ticker():
+    """A progress callback that overwrites one line while a share is walked.
+
+    Only on a TTY: piped into a file or another command, a carriage return
+    every directory produces one enormous unreadable line.
+    """
+    if not sys.stderr.isatty():
+        return None
+
+    def tick(directories, files):
+        click.echo(f"\r   scanning… {directories} folders, {files} files",
+                   nl=False, err=True)
+    return tick
+
+
+def _clear_ticker():
+    if sys.stderr.isatty():
+        click.echo("\r" + " " * 50 + "\r", nl=False, err=True)
+
+
+@main.command(name="ls")
+@click.argument("path", default="", required=False)
+@click.option("--server", "server_name", default=None,
+              help="Which saved server to browse (default: the active one)")
+def ls(path, server_name):
+    """List a directory on the server
+
+    Browses the share so you can find a destination without guessing at it.
+    PATH is relative to the share root; with no PATH, lists the root itself.
+
+    Reads one directory rather than indexing the share, so it stays fast on a
+    NAS with a lot on it.
+    """
+    client, server = _connected_client(server_name)
+    try:
+        entries = client.list_directory(path)
+    except Exception as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+    finally:
+        # release, not disconnect: `delete_session` closes the pooled
+        # connection for the whole process. Harmless in a one-shot CLI,
+        # wrong the moment this code is reused anywhere long-lived.
+        client.release()
+
+    click.echo(f"📂 {server['share']}:/{path.strip('/')}")
+    if not entries:
+        click.echo("   (empty)")
+        return
+    # Sized to the longest name so the sizes line up in a column, but capped:
+    # one pathological filename shouldn't push every size off the screen.
+    names = {e["name"] + ("/" if e["is_dir"] else "") for e in entries}
+    width = min(max(max(len(n) for n in names), 12), 48)
+    for entry in entries:
+        if entry["is_dir"]:
+            mark, size = "📁", ""
+        elif entry["is_symlink"]:
+            mark, size = "🔗", ""
+        else:
+            mark, size = "  ", format_bytes(entry["size"])
+        name = entry["name"] + ("/" if entry["is_dir"] else "")
+        click.echo(f"  {mark} {name:<{width}}  {size:>9}".rstrip())
+
+    dirs = sum(1 for e in entries if e["is_dir"])
+    click.echo(f"\n   {dirs} folder(s), {len(entries) - dirs} file(s)")
+
+
+@main.command()
+@click.argument("path", default="", required=False)
+@click.option("--server", "server_name", default=None,
+              help="Which saved server to inspect (default: the active one)")
+@click.option("--top", default=15, show_default=True,
+              help="How many entries to list")
+def usage(path, server_name, top):
+    """Show what is using space on the server
+
+    Ranks each folder by everything *beneath* it, so a big file buried three
+    levels down is attributed to the folder you would actually delete.
+
+    PATH is relative to the share root; pass a folder from the listing to drill
+    into it.
+    """
+    client, server = _connected_client(server_name)
+    try:
+        volume = None
+        try:
+            volume = client.volume_info()
+        except Exception:
+            # Not every server answers this, and a usage report is still
+            # useful without it. Silence beats an error about a side dish.
+            pass
+        report = client.usage_tree(path, on_scan=_scan_ticker())
+        _clear_ticker()
+    except Exception as e:
+        _clear_ticker()
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+    finally:
+        # release, not disconnect: `delete_session` closes the pooled
+        # connection for the whole process. Harmless in a one-shot CLI,
+        # wrong the moment this code is reused anywhere long-lived.
+        client.release()
+
+    location = f"{server['share']}:/{report['path']}"
+    click.echo(f"\n📊 {location} — {format_bytes(report['total'])} "
+               f"in {report['files']:,} file(s)")
+    summary, quota = format_volume(volume)
+    if summary:
+        click.echo(f"   Disk: {summary}")
+        if quota:
+            click.echo(f"   {quota}")
+
+    children = report["children"]
+    if not children:
+        click.echo("\n   (nothing here)")
+        return
+
+    click.echo("")
+    largest = children[0]["total"] or 1
+    for child in children[:top]:
+        filled = round(10 * child["total"] / largest)
+        bar = "█" * filled + "░" * (10 - filled)
+        name = child["name"] + ("/" if child["is_dir"] else "")
+        click.echo(f"   {bar} {format_bytes(child['total']):>9}  {name}")
+
+    if len(children) > top:
+        rest = sum(c["total"] for c in children[top:])
+        click.echo(f"   … and {len(children) - top} more, "
+                   f"{format_bytes(rest)} in total")
+    if any(c["is_dir"] for c in children):
+        first = next(c for c in children if c["is_dir"])
+        click.echo(f"\n   Drill in with: nasync usage {first['path']}")
+
+
+@main.command()
+@click.argument("path", default="", required=False)
+@click.option("--server", "server_name", default=None,
+              help="Which saved server to inspect (default: the active one)")
+@click.option("--verify", is_flag=True,
+              help="Confirm by content. Reads every candidate over the network.")
+@click.option("--min-size", default=1024 * 1024, show_default=True,
+              help="Ignore files smaller than this many bytes")
+@click.option("--top", default=15, show_default=True,
+              help="How many groups to list")
+def duplicates(path, server_name, verify, min_size, top):
+    """Find files that appear more than once on the server
+
+    Grouping by size is free — every size is already known from the scan. Use
+    --verify to confirm by content, which has to read each candidate over the
+    network because SMB has no server-side hash.
+    """
+    client, server = _connected_client(server_name)
+    try:
+        groups = client.find_duplicates(path, min_size=min_size,
+                                        on_scan=_scan_ticker())
+        _clear_ticker()
+        if verify and groups:
+            cost = client.duplicate_scan_cost(groups)
+            click.echo(f"🔍 Verifying by content — reading {format_bytes(cost)} "
+                       f"from the server…")
+            groups = client.find_duplicates(path, verify=True, min_size=min_size)
+    except Exception as e:
+        _clear_ticker()
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+    finally:
+        # release, not disconnect: `delete_session` closes the pooled
+        # connection for the whole process. Harmless in a one-shot CLI,
+        # wrong the moment this code is reused anywhere long-lived.
+        client.release()
+
+    location = f"{server['share']}:/{path.strip('/')}"
+    if not groups:
+        click.echo(f"✅ No duplicate candidates under {location} "
+                   f"(files under {format_bytes(min_size)} were skipped).")
+        return
+
+    recoverable = sum(g["wasted"] for g in groups)
+    click.echo(f"\n🔁 {len(groups)} group(s) under {location} — "
+               f"{format_bytes(recoverable)} recoverable")
+    if not verify:
+        cost = client.duplicate_scan_cost(groups)
+        click.echo(f"   Matched by size only. Confirm with --verify "
+                   f"(reads {format_bytes(cost)}).")
+
+    for group in groups[:top]:
+        click.echo(f"\n   {format_bytes(group['wasted'])} wasted · "
+                   f"{len(group['paths'])} × {format_bytes(group['size'])}"
+                   f"{' · verified' if group['hash'] else ''}")
+        for rel in group["paths"]:
+            click.echo(f"      {rel}")
+
+    if len(groups) > top:
+        click.echo(f"\n   … and {len(groups) - top} more group(s)")
+    click.echo("\n   NASync never deletes anything here — remove copies yourself.")
+
+
+@main.command()
+@click.argument("state", type=click.Choice(["on", "off"]), required=False)
+@click.option("--server", "server_name", default=None,
+              help="Which saved server to change (default: the active one)")
+def encryption(state, server_name):
+    """Show or set SMB 3 encryption for a server
+
+    Encryption protects the *contents* of your transfers on the network. It
+    needs SMB 3 or newer at both ends, and costs throughput — on a NAS without
+    hardware AES it can halve transfer speed, which is why it is off unless you
+    turn it on.
+
+    Turning it on is a hard requirement, not a preference: if the server can't
+    encrypt, NASync refuses the connection rather than quietly sending your
+    files in the clear.
+    """
+    config = Config()
+    name = server_name or config.get_active_server_name()
+    if not name:
+        click.echo("❌ No servers configured. Run 'nasync setup' first.", err=True)
+        raise SystemExit(1)
+
+    server = config.get_server(name)
+    if not server:
+        click.echo(f"❌ No server named '{name}'. See 'nasync servers'.", err=True)
+        raise SystemExit(1)
+
+    if state is None:
+        current = "on" if server.get("encrypt") else "off"
+        click.echo(f"Encryption for '{name}': {current}")
+        click.echo(f"  Switch with: nasync encryption "
+                   f"{'off' if current == 'on' else 'on'} --server {name}")
+        return
+
+    wanted = state == "on"
+    config.save_server(name, server["ip"], server["username"],
+                       server.get("password", ""), server["share"],
+                       server.get("port", 445), encrypt=wanted)
+    click.echo(f"✅ Encryption for '{name}': {state}")
+    if wanted:
+        # Said now rather than at the next sync: a scheduled run that starts
+        # failing at 02:00 because the NAS is too old is a bad way to find out.
+        click.echo("   Check it works now with: nasync test-connection")
+
+
+@main.command()
+@click.argument("mode", type=click.Choice(SYNC_MODES), required=False)
+def mode(mode):
+    """Show or set the sync mode used by sync, watch, and auto
+
+    With no argument, prints the current mode. Restore is unaffected — it never
+    deletes local files in either mode.
+    """
+    config = Config()
+    if mode:
+        config.set_sync_mode(mode)
+        click.echo(f"✅ Sync mode: {mode} — {_MODE_HELP[mode]}")
+        return
+    current = config.get_sync_mode()
+    click.echo(f"Sync mode: {current} — {_MODE_HELP[current]}")
+    other = next(m for m in SYNC_MODES if m != current)
+    click.echo(f"  Switch with: nasync mode {other}")
+
+
+def _describe_automation(config) -> list:
+    """The automation settings as lines, shared by `status` and `auto --status`."""
+    a = config.get_automation()
+    lines = [
+        f"  Live sync:      {'on' if a['live_sync'] else 'off'}"
+        f"{'  (syncs seconds after a file changes, on your home network)' if a['live_sync'] else ''}",
+        f"  Scheduled sync: {'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}",
+    ]
+    if a["interval_minutes"] > 0:
+        lines.append(f"  Interval sync:  every {a['interval_minutes']} min")
+    if not a["background"]:
+        lines.append("  Background:     off — nothing runs the triggers above "
+                     "until you turn it back on")
+    elif a["live_sync"] or a["scheduled_sync"]:
+        lines.append(f"  Background:     {service.status()['detail']}")
+    lines.append(f"  Notifications:  {_describe_notifications(config)}")
+    return lines
+
+
+def _describe_notifications(config) -> str:
+    """One line covering both the setting and whether the desktop can show them."""
+    if not config.get_notifications():
+        return "off"
+    if not notify.available():
+        return ("on, but this machine has no notification daemon "
+                "(install libnotify or run a desktop session)")
+    return "on — background syncs announce themselves"
+
+
+def _apply_service(config) -> None:
+    """Match the background service to the settings, reporting what happened."""
+    try:
+        result = service.apply(config)
+    except Exception as e:
+        click.echo(f"⚠️  Settings saved, but the background service failed: {e}")
+        return
+    click.echo(f"   {result['detail']}")
+
+
+@main.command(name="live-sync")
+@click.argument("state", type=click.Choice(["on", "off"]), required=False)
+def live_sync(state):
+    """Turn live sync on or off (sync moments after a file changes)
+
+    Only syncs while this machine is on the same network as the server, so a
+    laptop away from home waits and syncs on the way back in.
+    """
+    config = Config()
+    if state is None:
+        a = config.get_automation()
+        click.echo(f"Live sync: {'on' if a['live_sync'] else 'off'}")
+        return
+    config.set_automation(live_sync=(state == "on"))
+    click.echo(f"✅ Live sync: {state}")
+    _apply_service(config)
+
+
+@main.command(name="scheduled-sync")
+@click.argument("state", type=click.Choice(["on", "off"]), required=False)
+@click.option("--at", default=None, metavar="HH:MM",
+              help="Time of day to sync (default 02:00)")
+def scheduled_sync(state, at):
+    """Turn the daily scheduled sync on or off, and set its time
+
+    A run missed because the machine was asleep or away from home isn't lost —
+    it happens at the first opportunity that day.
+    """
+    config = Config()
+    if state is None and at is None:
+        a = config.get_automation()
+        click.echo(f"Scheduled sync: "
+                   f"{'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}")
+        return
+    try:
+        if at is not None:
+            config.set_automation(scheduled_time=at)
+        if state is not None:
+            config.set_automation(scheduled_sync=(state == "on"))
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+
+    a = config.get_automation()
+    click.echo(f"✅ Scheduled sync: "
+               f"{'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}")
+    _apply_service(config)
+
+
+@main.command()
+@click.argument("state", type=click.Choice(["on", "off"]), required=False)
+@click.option("--test", "send_test", is_flag=True,
+              help="Send a test notification to check the desktop shows them")
+def notifications(state, send_test):
+    """Turn desktop notifications for automatic syncs on or off
+
+    A background sync announces when it starts and what it moved, and says so
+    when a scheduled run couldn't happen at all — which is the failure worth
+    knowing about, since nobody is watching the log.
+    """
+    config = Config()
+    if send_test:
+        if not notify.available():
+            click.echo("❌ No notification daemon here (looked for gdbus and "
+                       "notify-send).", err=True)
+            raise SystemExit(1)
+        notify.send("NASync", "Notifications are working.")
+        click.echo(f"📨 Sent a test notification via {notify.backend()}.")
+        return
+
+    if state is None:
+        click.echo(f"Notifications: {_describe_notifications(config)}")
+        return
+
+    config.set_notifications(state == "on")
+    click.echo(f"✅ Notifications: {_describe_notifications(config)}")
+    # The running service re-reads the config, so there's nothing to restart.
+
+
+@main.command(name="service")
+@click.argument("action",
+                type=click.Choice(["status", "on", "off", "install", "uninstall",
+                                   "restart"]),
+                required=False, default="status")
+def service_cmd(action):
+    """Turn background syncing on or off, or inspect it
+
+    'on'/'off' is the same switch as Settings ▸ Run in the background;
+    'install'/'uninstall' are aliases for it.
+    """
+    config = Config()
+    try:
+        if action in ("install", "on"):
+            # Record the intent first, so a later settings change doesn't
+            # reconcile the service straight back off again.
+            config.set_automation(background=True)
+            if service.backend() == service.PORTAL:
+                # The portal asks the user, and the answer may take as long as
+                # they take to read it — so say what is about to happen rather
+                # than leaving the terminal silent behind a dialog.
+                click.echo("🔐 Asking your desktop for permission to run in "
+                           "the background…")
+            result = service.install()
+            if isinstance(result, dict):
+                click.echo("✅ Permission granted.")
+            else:
+                click.echo(f"📄 wrote {result}")
+            click.echo("✅ Background syncing enabled.")
+            hint = service.linger_hint()
+            if hint:
+                click.echo(hint)
+        elif action in ("uninstall", "off"):
+            config.set_automation(background=False)
+            if service.uninstall():
+                click.echo("✅ Background syncing turned off.")
+            else:
+                click.echo("Background syncing was already off.")
+        elif action == "restart":
+            service.restart()
+            click.echo("✅ Restarted.")
+    except Exception as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+
+    state = service.status()
+    click.echo(f"Background service: {state['detail']}")
+    for line in _describe_automation(config):
+        click.echo(line)
+
+
 @main.command()
 @click.option("--interval", type=int, default=None,
               help="Also sync every N minutes (0 turns the interval off)")
-@click.option("--on-change/--no-on-change", "on_change", default=None,
-              help="Sync when watched files change (default on)")
-@click.option("--status", is_flag=True, help="Show automation settings and exit")
-def auto(interval, on_change, status):
-    """Keep folders synced automatically (watch on-change and/or on an interval)
+@click.option("--live/--no-live", "live", default=None,
+              help="Sync when watched files change")
+@click.option("--schedule/--no-schedule", "schedule", default=None,
+              help="Sync once a day at a set time")
+@click.option("--at", default=None, metavar="HH:MM",
+              help="Time for the daily scheduled sync")
+@click.option("--status", "show_status", is_flag=True,
+              help="Show automation settings and exit")
+@click.option("--sync-at-start/--no-sync-at-start", "sync_at_start", default=None,
+              help="Sync once on startup (default: only when live sync is on)")
+def auto(interval, live, schedule, at, show_status, sync_at_start):
+    """Run automatic syncing in the foreground (live and/or scheduled)
 
-    Runs until Ctrl+C. Options are remembered, so a later plain `nasync auto`
-    reuses them. Good as a systemd/user service — see the README.
+    This is what the background service runs. Options are remembered, so a
+    later plain `nasync auto` reuses them. Runs until Ctrl+C.
     """
     config = Config()
-    a = config.get_automation()
-    if interval is not None:
-        a = config.set_automation(interval_minutes=interval)
-    if on_change is not None:
-        a = config.set_automation(on_change=on_change)
+    try:
+        if interval is not None:
+            config.set_automation(interval_minutes=interval)
+        if live is not None:
+            config.set_automation(live_sync=live)
+        if at is not None:
+            config.set_automation(scheduled_time=at)
+        if schedule is not None:
+            config.set_automation(scheduled_sync=schedule)
+    except ValueError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
 
-    if status:
-        click.echo(f"Automation: on-change={a['on_change']}, "
-                   f"interval={a['interval_minutes']}m")
+    if show_status:
+        click.echo("Automation:")
+        for line in _describe_automation(config):
+            click.echo(line)
         return
 
-    config.set_automation(enabled=True)
-    from nasync.automation import Automator
+    from nasync.core.automation import Automator
     try:
-        Automator(reporter=click.echo).run(
-            on_change=a["on_change"], interval_minutes=a["interval_minutes"])
+        Automator(reporter=click.echo, config=config).run(
+            sync_at_start=sync_at_start)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
@@ -287,35 +830,72 @@ def auto(interval, on_change, status):
 @main.command()
 @click.option("--pair", default=None, help="Specific pair to watch")
 def watch(pair):
-    """Watch local directories and auto-sync on changes (alias: nasync auto)"""
-    watcher = Watcher()
+    """Watch local directories and sync on changes (one-off live sync)
+
+    The same trigger as live sync, running in the foreground until Ctrl+C,
+    without changing your saved settings.
+    """
+    from nasync.core.automation import Automator
+
+    config = Config()
+    if pair and not config.get_pair(pair):
+        click.echo(f"❌ Pair '{pair}' not found.", err=True)
+        raise SystemExit(1)
     try:
-        watcher.watch_pairs(pair)
+        Automator(reporter=click.echo, config=config).run(
+            live_sync=True, scheduled_sync=False, interval_minutes=0,
+            only_pair=pair)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
 
 
 @main.command()
-def tui():
-    """Launch the interactive terminal UI"""
-    try:
-        from nasync.tui import run
-    except ImportError:
+def gui():
+    """Launch the desktop app (GTK4 + libadwaita)"""
+    # Probe before importing: `nasync.gui` defers its own `gi` import into
+    # run(), so catching ImportError around the import here would miss it and
+    # the user would get a traceback instead of these instructions. This is
+    # also the same check install-desktop uses, so the two can't disagree.
+    from nasync.system.launcher import adw_version
+    from nasync.gui import ADW_MIN
+
+    found = adw_version()
+    want = ".".join(str(n) for n in ADW_MIN)
+    if found is None:
         click.echo(
-            "The TUI needs Textual, which isn't installed. Add it with:\n"
-            "  pip install 'nasync[tui]'    (or:  pip install textual )",
+            "The desktop app needs PyGObject with GTK4 and libadwaita "
+            f"{want} or newer.\n"
+            "These are system packages, not pip installs:\n"
+            "  Fedora:        sudo dnf install python3-gobject gtk4 libadwaita\n"
+            "  Ubuntu/Debian: sudo apt install python3-gi gir1.2-gtk-4.0 "
+            "gir1.2-adw-1\n"
+            "If you installed nasync in a virtualenv, create it with\n"
+            "'--system-site-packages' so it can see them.",
             err=True,
         )
         raise SystemExit(1)
-    run()
+    if found < ADW_MIN:
+        click.echo(
+            f"This libadwaita is {found[0]}.{found[1]}; the desktop app needs "
+            f"{want} or newer.\n"
+            "Ubuntu 22.04 ships 1.1 and can't run it — 24.04 or newer can.\n"
+            "Install the Flatpak, which carries its own runtime, or use the "
+            "'nasync' commands, which need none of this.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    from nasync.gui import run
+
+    raise SystemExit(run())
 
 
 @main.command(name="install-desktop")
 @click.option("--uninstall", is_flag=True, help="Remove the launcher instead of adding it")
 def install_desktop(uninstall):
     """Add a desktop launcher + icon to your app menu (Linux)"""
-    from nasync import desktop
+    from nasync.system import launcher as desktop
     try:
         if uninstall:
             removed = desktop.uninstall()
@@ -329,11 +909,70 @@ def install_desktop(uninstall):
             written = desktop.install()
             for p in written:
                 click.echo(f"📄 wrote {p}")
-            click.echo("\n✅ Installed! Look for 'nasync' in your application menu.")
-            click.echo("   Clicking it opens 'nasync tui' in a terminal window.")
+            click.echo("\n✅ Installed! Look for 'NASync' in your application menu.")
+            click.echo("   Clicking it opens the desktop app.")
     except Exception as e:
         click.echo(f"❌ {e}", err=True)
         raise SystemExit(1)
+
+
+@main.command(name="server-info")
+@click.option("--server", "server_name", default=None,
+              help="Which saved server to inspect (default: the active one)")
+def server_info(server_name):
+    """Show what this server is and what was negotiated with it
+
+    Read-only, and everything here comes from the protocol rather than from a
+    vendor API — so it works the same on a Synology, a TrueNAS box or a
+    Raspberry Pi running Samba.
+    """
+    client, server = _connected_client(server_name)
+    try:
+        info = client.server_info()
+    except Exception as e:
+        click.echo(f"❌ {e}", err=True)
+        raise SystemExit(1)
+    finally:
+        client.release()
+
+    conn = info["connection"]
+    click.echo(f"\n🖥️  {server['name']}  ({info['ip']}:{info['port']}, "
+               f"user {info['username']})")
+
+    click.echo("\n  Connection")
+    click.echo(f"    Protocol:    {conn['dialect_name']}")
+    # Encryption and signing are different guarantees, and a panel that showed
+    # only one of them would imply the other.
+    click.echo(f"    Encrypted:   {'yes' if conn['encrypted'] else 'no'}"
+               + ("" if conn["encrypted"] or not conn["supports_encryption"]
+                  else "  (this server supports it — 'nasync encryption on')"))
+    click.echo(f"    Signed:      {'yes' if conn['signed'] else 'no'}"
+               + ("  (encryption covers signing)" if conn["encrypted"] else ""))
+    click.echo(f"    Max read:    {format_bytes(conn['max_read'])}")
+    click.echo(f"    Max write:   {format_bytes(conn['max_write'])}")
+
+    click.echo("\n  Storage")
+    summary, quota = format_volume(info["volume"])
+    if summary:
+        click.echo(f"    Space:       {summary}")
+        if quota:
+            click.echo(f"    Quota:       {quota}")
+    else:
+        click.echo(f"    (not reported by this server"
+                   f"{': ' + info['volume_error'] if info.get('volume_error') else ''})")
+
+    click.echo("\n  Shares")
+    shares = info["shares"]
+    if shares is None:
+        click.echo(f"    (couldn't be listed: {info.get('shares_error', 'unknown')})")
+    else:
+        for share in shares:
+            mark = "●" if share["name"] == info["share"] else " "
+            note = "  (administrative)" if share["is_special"] else ""
+            comment = f"  — {share['comment']}" if share["comment"] else ""
+            click.echo(f"    {mark} {share['name']:<16} {share['type']:<8}"
+                       f"{note}{comment}")
+    click.echo("")
 
 
 @main.command(name="test-connection")
@@ -346,7 +985,8 @@ def test_connection():
         raise SystemExit(1)
 
     client = SAMBAClient(sc["ip"], sc["username"], sc["password"],
-                         sc["share"], port=sc.get("port", 445))
+                         sc["share"], port=sc.get("port", 445),
+                         encrypt=sc.get("encrypt", False))
     click.echo(
         f"🔌 Testing {sc['ip']}:{sc['port']} "
         f"(share '{sc['share']}', user '{sc['username']}')..."
@@ -389,7 +1029,8 @@ def servers_cmd():
         return
     for s in servers:
         mark = "* " if s["name"] == active else "  "
-        click.echo(f"{mark}{s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']})")
+        lock = " 🔒" if s.get("encrypt") else ""
+        click.echo(f"{mark}{s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']}){lock}")
 
 
 @main.command()
@@ -412,6 +1053,20 @@ def status():
     active = config.get_active_server_name()
     pairs = config.get_pairs()
 
+    if config.imported_from_host:
+        # Copying someone's saved passwords into a new location shouldn't
+        # happen silently, even when it's the helpful thing to do.
+        click.echo("📥 Imported your existing settings (servers, folders and "
+                   "saved passwords) from ~/.config/nasync. The original is "
+                   "untouched.")
+
+    problem = config.check_credentials()
+    if problem:
+        # Loud, and before anything else: every symptom of this shows up later
+        # as the server rejecting a login, which sends people to re-check a
+        # password that is in fact perfectly correct.
+        click.echo(f"🔒 Saved passwords couldn't be read — {problem}")
+
     if not servers:
         click.echo("❌ No servers configured. Run 'nasync setup' first.")
         raise SystemExit(1)
@@ -420,14 +1075,28 @@ def status():
     click.echo("  Servers:")
     for s in servers:
         mark = "●" if s["name"] == active else "○"
+        wire = "encrypted" if s.get("encrypt") else "not encrypted"
         click.echo(f"    {mark} {s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']})")
+        click.echo(f"        connection: {wire}")
 
-    click.echo(f"\n  Sync pairs ({len(pairs)})  →  active server '{active}'")
-    if pairs:
-        for p in pairs:
-            click.echo(f"    • {p['name']}: {p['local']} → {p['server']}")
-    else:
-        click.echo("    ⚠️  none yet")
+    click.echo(f"\n  Saved passwords: {config.credentials_status()}")
+
+    current_mode = config.get_sync_mode()
+    click.echo(f"\n  Sync mode: {current_mode} — {_MODE_HELP[current_mode]}")
+
+    click.echo("\n  Automatic syncing:")
+    for line in _describe_automation(config):
+        click.echo(f"  {line}")
+
+    click.echo("\n  Sync pairs (each server has its own):")
+    for s in servers:
+        owned = config.get_pairs(s["name"])
+        mark = "●" if s["name"] == active else "○"
+        click.echo(f"    {mark} {s['name']} ({len(owned)})")
+        for p in owned:
+            click.echo(f"        • {p['name']}: {p['local']} → {p['server']}")
+        if not owned:
+            click.echo("        ⚠️  none yet")
 
 
 if __name__ == "__main__":

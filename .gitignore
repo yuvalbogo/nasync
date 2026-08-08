@@ -16,6 +16,7 @@ sdist/
 var/
 wheels/
 *.egg-info/
+.pytest_cache/
 .installed.cfg
 *.egg
 MANIFEST
@@ -31,5 +32,9 @@ env/
 .DS_Store
 *.log
 .claude
+# private working notes for Claude Code; not part of the published project
+CLAUDE.md
 # raw traced logo source (checkerboard artifact); clean derivatives are committed
 nasync/assets/nasync_logo.svg
+# Personal roadmap towards the project; not part of the published project
+ROADMAP.md

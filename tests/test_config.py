@@ -1,0 +1,490 @@
+import json
+import os
+import tempfile
+from nasync.core.config import Config
+
+
+def _cfg(tmp):
+    os.environ["XDG_CONFIG_HOME"] = tmp
+    return Config()
+
+
+def test_server_crud():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("home", "10.0.0.5", "user", "secret", "backup", 445)
+        assert c.get_active_server_name() == "home"
+        assert [s["name"] for s in c.list_servers()] == ["home"]
+
+        # password lives in .creds (0600), never in config.json
+        assert "secret" not in c.config_file.read_text()
+        assert oct(c.creds_file.stat().st_mode)[-3:] == "600"
+
+        sc = c.get_server_config()
+        assert sc["ip"] == "10.0.0.5" and sc["password"] == "secret" and sc["port"] == 445
+
+        # a second server; active stays until switched
+        c.add_or_update_server("work", "10.0.0.9", "u2", "pw2", "share2", 4450)
+        assert c.get_active_server_name() == "home"
+        assert c.set_active_server("work")
+        assert c.get_server_config()["ip"] == "10.0.0.9"
+
+        # removing the active server falls back to another
+        c.remove_server("work")
+        assert c.get_active_server_name() == "home"
+        print("✅ test_server_crud passed")
+
+
+def test_migration_from_legacy():
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["XDG_CONFIG_HOME"] = tmp
+        cfgdir = os.path.join(tmp, "nasync")
+        os.makedirs(cfgdir)
+        json.dump(
+            {"server": {"ip": "1.2.3.4", "username": "yuno", "share": "Storage", "port": 445},
+             "pairs": [{"name": "Docs", "local": "/x", "server": "/Docs"}]},
+            open(os.path.join(cfgdir, "config.json"), "w"),
+        )
+        open(os.path.join(cfgdir, ".creds"), "w").write("legacypass")
+
+        c = Config()
+        assert "server" not in c.data                       # old key gone
+        assert c.get_active_server_name() == "Storage"       # named from the share
+        sc = c.get_server_config()
+        assert sc["ip"] == "1.2.3.4" and sc["password"] == "legacypass"
+        assert [p["name"] for p in c.get_pairs()] == ["Docs"]  # pairs preserved
+        print("✅ test_migration_from_legacy passed")
+
+
+def test_pairs():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("home", "10.0.0.5", "u", "p", "backup", 445)
+        assert c.add_pair("/home/user/docs", "/Docs", "Documents") == "Documents"
+        assert len(c.get_pairs()) == 1
+        try:
+            c.add_pair("/b", "/b", "Documents")
+            raise AssertionError("expected duplicate rejection")
+        except ValueError:
+            pass
+        assert c.add_pair("/home/user/Photos/", "/Photos") == "Photos"
+
+        # edit: rename + change destination
+        c.update_pair("Documents", "/home/user/docs", "/DocsV2", "Docs")
+        assert c.get_pair("Documents") is None
+        assert c.get_pair("Docs")["server"] == "/DocsV2"
+        # editing to a name owned by another pair is rejected
+        try:
+            c.update_pair("Docs", "/x", "/x", "Photos")
+            raise AssertionError("expected rename collision to be rejected")
+        except ValueError:
+            pass
+
+        c.remove_pair("Docs")
+        assert [p["name"] for p in c.get_pairs()] == ["Photos"]
+        print("✅ test_pairs passed")
+
+
+def test_pairs_belong_to_one_server():
+    """Each server owns its pairs. Previously one global list was retargeted at
+    whichever server was active — so switching servers silently pointed every
+    pair at the new one, and in mirror mode that deletes on the wrong NAS."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("home", "10.0.0.5", "u", "p", "backup", 445)
+        c.add_or_update_server("work", "10.0.0.9", "u", "p", "share", 445)
+
+        c.set_active_server("home")
+        c.add_pair("/home/user/docs", "/Docs", "Documents")
+        c.set_active_server("work")
+        c.add_pair("/home/user/code", "/Code", "Code")
+
+        assert [p["name"] for p in c.get_pairs()] == ["Code"]
+        assert [p["name"] for p in c.get_pairs("home")] == ["Documents"]
+        assert c.count_pairs("home") == 1 and c.count_pairs("work") == 1
+
+        # The same pair name on two servers is fine — they're separate lists.
+        c.add_pair("/elsewhere", "/Docs", "Documents")
+        assert c.count_pairs("work") == 2
+        assert c.get_pair("Documents", "home")["local"].endswith("/docs")
+        assert c.get_pair("Documents", "work")["local"] == "/elsewhere"
+
+        # Editing one server's pair leaves the other's alone.
+        c.update_pair("Documents", "/moved", "/Docs2", "Documents", server="work")
+        assert c.get_pair("Documents", "home")["server"] == "/Docs"
+        print("✅ test_pairs_belong_to_one_server passed")
+
+
+def test_removing_a_server_takes_its_pairs():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("home", "10.0.0.5", "u", "p", "backup", 445)
+        c.add_or_update_server("work", "10.0.0.9", "u", "p", "share", 445)
+        c.add_pair("/a", "/A", "a", server="home")
+        c.add_pair("/b", "/B", "b", server="work")
+
+        c.remove_server("home")
+        assert c.count_pairs("home") == 0
+        assert c.count_pairs("work") == 1        # untouched
+        assert "home" not in Config().data["pairs_by_server"]
+        print("✅ test_removing_a_server_takes_its_pairs passed")
+
+
+def test_renaming_a_server_keeps_its_pairs():
+    """save_server renames in place; the remove-then-add it replaced would have
+    dropped the pairs filed under the old name."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("home", "10.0.0.5", "u", "secret", "backup", 445)
+        c.add_pair("/a", "/A", "a")
+
+        c.save_server("home-nas", "10.0.0.5", "u", "secret", "backup", 445,
+                      orig_name="home")
+
+        fresh = Config()
+        assert [s["name"] for s in fresh.list_servers()] == ["home-nas"]
+        assert [p["name"] for p in fresh.get_pairs("home-nas")] == ["a"]
+        assert fresh.get_server("home-nas")["password"] == "secret"
+        print("✅ test_renaming_a_server_keeps_its_pairs passed")
+
+
+def test_global_pairs_migrate_to_the_active_server():
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["XDG_CONFIG_HOME"] = tmp
+        cfgdir = os.path.join(tmp, "nasync")
+        os.makedirs(cfgdir)
+        json.dump({
+            "servers": [
+                {"name": "home", "ip": "10.0.0.5", "username": "u",
+                 "share": "backup", "port": 445},
+                {"name": "work", "ip": "10.0.0.9", "username": "u",
+                 "share": "share", "port": 445},
+            ],
+            "active_server": "work",
+            "pairs": [{"name": "Docs", "local": "/x", "server": "/Docs"}],
+        }, open(os.path.join(cfgdir, "config.json"), "w"))
+
+        c = Config()
+        assert "pairs" not in c.data                       # old key gone
+        assert [p["name"] for p in c.get_pairs("work")] == ["Docs"]
+        assert c.get_pairs("home") == []
+        assert [p["name"] for p in Config().get_pairs("work")] == ["Docs"]
+        print("✅ test_global_pairs_migrate_to_the_active_server passed")
+
+
+def test_pairs_added_before_any_server_are_kept_until_one_exists():
+    """`nasync add` before `nasync init` leaves pairs with no owner; they must
+    wait rather than being dropped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["XDG_CONFIG_HOME"] = tmp
+        cfgdir = os.path.join(tmp, "nasync")
+        os.makedirs(cfgdir)
+        json.dump({"pairs": [{"name": "Docs", "local": "/x", "server": "/Docs"}]},
+                  open(os.path.join(cfgdir, "config.json"), "w"))
+
+        c = Config()
+        assert c.data["pairs"] == [{"name": "Docs", "local": "/x", "server": "/Docs"}]
+        c.add_or_update_server("home", "10.0.0.5", "u", "p", "backup", 445)
+
+        migrated = Config()                                # next load adopts them
+        assert [p["name"] for p in migrated.get_pairs("home")] == ["Docs"]
+        assert "pairs" not in migrated.data
+        print("✅ test_pairs_added_before_any_server_are_kept_until_one_exists passed")
+
+
+def test_sync_mode():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        # Mirror is what pushes did before the mode existed, so an upgraded
+        # install must keep behaving that way until told otherwise.
+        assert c.get_sync_mode() == "mirror"
+
+        assert c.set_sync_mode("update") == "update"
+        assert Config().get_sync_mode() == "update"      # survives a reload
+
+        try:
+            c.set_sync_mode("hard")
+            raise AssertionError("expected an unknown mode to be rejected")
+        except ValueError:
+            pass
+        assert c.get_sync_mode() == "update"             # rejected, not applied
+
+        # A hand-edited or corrupted value falls back rather than syncing in an
+        # undefined mode.
+        c.data["sync_mode"] = "nonsense"
+        assert c.get_sync_mode() == "mirror"
+        print("✅ test_sync_mode passed")
+
+
+def test_automation_defaults_to_off():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        a = c.get_automation()
+        # Automatic syncing can delete on the server; nobody gets opted in.
+        assert a["live_sync"] is False
+        assert a["scheduled_sync"] is False
+        assert a["scheduled_time"] == "02:00"
+        assert c.automation_wanted() is False
+
+        c.set_automation(live_sync=True)
+        assert c.automation_wanted() is True
+        assert Config().get_automation()["live_sync"] is True
+        print("✅ test_automation_defaults_to_off passed")
+
+
+def test_background_gates_the_service_without_clearing_triggers():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        # On by default, so turning a trigger on just works.
+        assert c.get_automation()["background"] is True
+        c.set_automation(live_sync=True)
+        assert c.background_service_wanted() is True
+
+        c.set_automation(background=False)
+        assert c.background_service_wanted() is False
+        assert c.automation_wanted() is True          # the trigger is still set
+        assert c.get_automation()["live_sync"] is True
+        print("✅ test_background_gates_the_service_without_clearing_triggers passed")
+
+
+def test_scheduled_time_is_validated_and_normalized():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        assert c.set_automation(scheduled_time="7:5")["scheduled_time"] == "07:05"
+
+        for bad in ("25:00", "02:61", "2pm", "0200", ""):
+            try:
+                c.set_automation(scheduled_time=bad)
+                raise AssertionError(f"expected '{bad}' to be rejected")
+            except ValueError:
+                pass
+        assert c.get_automation()["scheduled_time"] == "07:05"
+
+        # A hand-edited value falls back rather than crashing the daemon.
+        c.data["automation"]["scheduled_time"] = "nonsense"
+        assert c.get_automation()["scheduled_time"] == "02:00"
+        print("✅ test_scheduled_time_is_validated_and_normalized passed")
+
+
+def test_legacy_automation_keys_migrate_to_live_sync():
+    """Anyone who ran `nasync auto` before the rename had watching on, and
+    keeps it. Everyone else lands on the new default of off."""
+    for legacy, expected in (
+        ({"enabled": True, "on_change": True, "interval_minutes": 0}, True),
+        ({"enabled": False, "on_change": True, "interval_minutes": 0}, False),
+        ({"enabled": True, "on_change": False, "interval_minutes": 15}, False),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["XDG_CONFIG_HOME"] = tmp
+            cfgdir = os.path.join(tmp, "nasync")
+            os.makedirs(cfgdir)
+            json.dump({"automation": dict(legacy)},
+                      open(os.path.join(cfgdir, "config.json"), "w"))
+
+            a = Config().get_automation()
+            assert a["live_sync"] is expected, (legacy, a)
+            assert a["scheduled_sync"] is False
+            assert a["interval_minutes"] == legacy["interval_minutes"]
+    print("✅ test_legacy_automation_keys_migrate_to_live_sync passed")
+
+
+def test_record_scheduled_run_does_not_clobber_concurrent_edits():
+    """The daemon writes the run date while the desktop app may be writing
+    settings; a stale in-memory copy would silently undo them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        daemon = _cfg(tmp)
+        daemon.get_automation()                      # daemon's view is now stale
+
+        app = Config()                               # the GUI, another process
+        app.set_automation(live_sync=True, scheduled_sync=True)
+
+        daemon.record_scheduled_run("2026-08-06")
+
+        fresh = Config().get_automation()
+        assert fresh["last_scheduled_run"] == "2026-08-06"
+        assert fresh["live_sync"] is True            # the GUI's change survived
+        assert fresh["scheduled_sync"] is True
+        print("✅ test_record_scheduled_run_does_not_clobber_concurrent_edits passed")
+
+
+# --------------------------------------------------------------------------- #
+# Importing a pip install's config the first time the Flatpak runs.
+#
+# Under Flatpak, XDG_CONFIG_HOME points inside ~/.var/app, so without this the
+# app opens empty and every server and folder has to be set up again — and
+# re-picking a folder in mirror mode is the operation with the worst failure
+# mode NASync has.
+# --------------------------------------------------------------------------- #
+import pytest
+
+import nasync.core.config as config_module
+
+
+@pytest.fixture
+def sandbox(monkeypatch, tmp_path):
+    """A fake sandbox: our config dir, and a separate 'host' one to import."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "sandbox"))
+    host = tmp_path / "host" / "nasync"
+    host.mkdir(parents=True)
+    monkeypatch.setattr(config_module, "host_config_dir", lambda: host)
+    monkeypatch.setattr(config_module, "in_flatpak", lambda: True)
+    return host
+
+
+def _seed_host(host, password="hunter2"):
+    (host / "config.json").write_text(json.dumps({
+        "servers": [{"name": "nas", "ip": "192.168.1.50", "username": "u",
+                     "share": "backup", "port": 445}],
+        "active_server": "nas",
+        "pairs_by_server": {"nas": [{"name": "docs", "local": "/home/u/Documents",
+                                     "server": "/docs"}]},
+    }))
+    (host / ".creds").write_text(json.dumps({"nas": password}))
+
+
+def test_first_sandboxed_run_adopts_an_existing_install(sandbox):
+    _seed_host(sandbox)
+    config = Config()
+
+    assert config.imported_from_host is True
+    assert [s["name"] for s in config.list_servers()] == ["nas"]
+    assert config.get_active_server_name() == "nas"
+    assert [p["name"] for p in config.get_pairs()] == ["docs"]
+    # Servers arriving without their passwords would look imported but fail to
+    # connect, which is worse than not importing at all.
+    assert config.get_server("nas")["password"] == "hunter2"
+    print("✅ test_first_sandboxed_run_adopts_an_existing_install passed")
+
+
+def test_import_copies_rather_than_moves(sandbox):
+    """The pip install has to keep working — this is reversible."""
+    _seed_host(sandbox)
+    before = (sandbox / "config.json").read_text()
+
+    Config()
+
+    assert (sandbox / "config.json").read_text() == before
+    assert (sandbox / ".creds").is_file()
+    print("✅ test_import_copies_rather_than_moves passed")
+
+
+def test_imported_credentials_are_not_world_readable(sandbox):
+    """copyfile doesn't carry permissions, and this file is the whole reason
+    the directory is locked down."""
+    _seed_host(sandbox)
+    config = Config()
+
+    assert oct(config.creds_file.stat().st_mode & 0o777) == "0o600"
+    print("✅ test_imported_credentials_are_not_world_readable passed")
+
+
+def test_import_never_overwrites_what_the_sandboxed_app_already_has(sandbox):
+    # The sandboxed app is set up first and has its own config...
+    existing = Config()
+    existing.add_or_update_server("mine", "10.0.0.1", "me", "pw", "share")
+
+    # ...and a pip install appears afterwards. Adopting it now would replace
+    # settings the user made in this app, which is not an import, it's a reset.
+    _seed_host(sandbox)
+    second = Config()
+
+    assert second.imported_from_host is False
+    assert [s["name"] for s in second.list_servers()] == ["mine"]
+    print("✅ test_import_never_overwrites_what_the_sandboxed_app_already_has passed")
+
+
+def test_no_import_outside_a_sandbox(sandbox, monkeypatch):
+    """Outside Flatpak the two paths are the same install; there is nothing to
+    import and copying would be a self-copy."""
+    monkeypatch.setattr(config_module, "in_flatpak", lambda: False)
+    _seed_host(sandbox)
+
+    assert Config().imported_from_host is False
+    print("✅ test_no_import_outside_a_sandbox passed")
+
+
+def test_no_import_when_source_and_destination_are_the_same_directory(
+        monkeypatch, tmp_path):
+    """FLATPAK_ID set by hand on an ordinary machine points both at
+    ~/.config/nasync — copying a file onto itself would truncate it."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(config_module, "in_flatpak", lambda: True)
+    monkeypatch.setattr(config_module, "host_config_dir",
+                        lambda: tmp_path / "nasync")
+
+    same = tmp_path / "nasync"
+    same.mkdir(parents=True, exist_ok=True)
+    (same / "config.json").write_text(json.dumps({"servers": [{"name": "keep"}]}))
+
+    config = Config()
+    assert config.imported_from_host is False
+    assert json.loads((same / "config.json").read_text())["servers"][0]["name"] == "keep"
+    print("✅ test_no_import_when_source_and_destination_are_the_same_directory passed")
+
+
+def test_nothing_to_import_is_not_an_error(sandbox):
+    assert Config().imported_from_host is False
+    print("✅ test_nothing_to_import_is_not_an_error passed")
+
+
+def test_an_unreadable_host_config_still_starts_the_app(sandbox, monkeypatch):
+    """Starting empty is what would have happened anyway; refusing to start is
+    not an improvement on it."""
+    _seed_host(sandbox)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(config_module.shutil, "copyfile", denied)
+
+    config = Config()
+    assert config.imported_from_host is False
+    assert config.list_servers() == []
+    print("✅ test_an_unreadable_host_config_still_starts_the_app passed")
+
+
+def test_encryption_defaults_off_and_survives_a_rename(config_home):
+    """Off by default, because defaulting to on breaks every NAS too old for
+    SMB 3 — a security improvement that turns into an outage."""
+    config = Config()
+    config.add_or_update_server("nas", "10.0.0.2", "u", "pw", "share")
+    assert config.get_server("nas")["encrypt"] is False
+    assert config.get_server_config()["encrypt"] is False
+
+    config.save_server("nas", "10.0.0.2", "u", "pw", "share", encrypt=True)
+    assert config.get_server("nas")["encrypt"] is True
+
+    # Renaming goes through the remove-and-re-add path; the flag has to make
+    # the journey along with the pairs.
+    config.add_pair("/tmp", "/dest", "p")
+    config.save_server("nas2", "10.0.0.2", "u", "pw", "share", orig_name="nas",
+                       encrypt=True)
+    assert config.get_server("nas2")["encrypt"] is True
+    assert [p["name"] for p in config.get_pairs("nas2")] == ["p"]
+    print("✅ test_encryption_defaults_off_and_survives_a_rename passed")
+
+
+def test_a_server_saved_before_0_12_reads_as_unencrypted(config_home):
+    """No `encrypt` key at all is what every existing install has on disk."""
+    config = Config()
+    config.add_or_update_server("old", "10.0.0.3", "u", "pw", "share")
+    del config.data["servers"][0]["encrypt"]
+    config.save()
+
+    reopened = Config()
+    assert reopened.get_server("old")["encrypt"] is False
+    assert reopened.get_server_config()["encrypt"] is False
+    print("✅ test_a_server_saved_before_0_12_reads_as_unencrypted passed")
+
+
+if __name__ == "__main__":
+    test_server_crud()
+    test_migration_from_legacy()
+    test_pairs()
+    test_sync_mode()
+    test_automation_defaults_to_off()
+    test_background_gates_the_service_without_clearing_triggers()
+    test_hints_are_remembered()
+    test_scheduled_time_is_validated_and_normalized()
+    test_legacy_automation_keys_migrate_to_live_sync()
+    test_record_scheduled_run_does_not_clobber_concurrent_edits()

@@ -57,7 +57,10 @@ trap cleanup EXIT
 
 # ---- 0. sanity ------------------------------------------------------------
 command -v nasync >/dev/null 2>&1 || die "nasync not on PATH — run 'pip install -e .' first."
-command -v smbclient  >/dev/null 2>&1 || die "smbclient not installed."
+# NASync itself speaks SMB through the smbprotocol library and needs no
+# binaries; this script uses the smbclient CLI only to probe when the
+# container's share has come up.
+command -v smbclient  >/dev/null 2>&1 || die "smbclient CLI not installed (needed by this script's readiness probe, not by nasync)."
 
 # ---- 1. start the Samba server -------------------------------------------
 say "Starting local Samba server ($ENGINE) on port $PORT"
@@ -85,7 +88,7 @@ say "Configuring nasync (isolated config at $XDG_CONFIG_HOME)"
 # Configure via the same API 'init' uses, so no interactive prompts are needed.
 python - "$PORT" "$USER_NAME" "$USER_PASS" "$SHARE" "$SRC" "$SERVER_SUBDIR" <<'PY'
 import sys
-from nasync.config import Config
+from nasync.core.config import Config
 port, user, pw, share, src, subdir = sys.argv[1:7]
 c = Config()
 c.set_server("127.0.0.1", user, pw, share, int(port))

@@ -43,5 +43,5 @@ jobs:
       continue-on-error: true
 
     - name: Format check with black
-      run: black --check nasync/
+      run: black --check nasync/ tests/
       continue-on-error: true

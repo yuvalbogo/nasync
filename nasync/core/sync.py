@@ -1,5 +1,5 @@
-from nasync.config import Config
-from nasync.samba import SAMBAClient, SyncCancelled
+from nasync.core.config import Config
+from nasync.core.samba import SAMBAClient, SyncCancelled
 
 
 class Syncer:
@@ -7,19 +7,26 @@ class Syncer:
 
     Output is routed through an injectable ``reporter`` callback (defaults to
     ``print`` so the CLI is unchanged). Operations *return a summary dict*
-    ``{"ok": int, "failed": int}`` instead of exiting, so any front-end (CLI,
-    TUI, ...) can decide how to react.
+    instead of exiting, so any front-end can decide how to react::
+
+        {"ok", "failed", "cancelled",            # per pair
+         "transferred", "skipped", "deleted", "errors", "unsupported"}
     """
 
     def __init__(self, reporter=None, progress=None, byte_progress=None,
-                 cancel_event=None):
-        self.config = Config()
+                 cancel_event=None, pair_progress=None, config=None):
+        self.config = config or Config()
         self._report = reporter or print
         self._progress = progress
         # Optional per-byte progress and a threading.Event for cancellation;
         # front-ends that don't supply them behave exactly as before.
         self._byte_progress = byte_progress
         self._cancel = cancel_event
+        # Per-*pair* progress: fires as each pair starts, so a front-end can
+        # show movement across pairs even for ones that turn out to be
+        # unchanged and transfer no files at all.
+        self._pair_progress = pair_progress or (
+            lambda index, total, name, verb: None)
 
     def _prepare(self, pair_name):
         """Validate config and return (client, pairs) ready to transfer."""
@@ -43,6 +50,7 @@ class Syncer:
             server_config["password"],
             server_config["share"],
             port=server_config.get("port", 445),
+            encrypt=server_config.get("encrypt", False),
             reporter=self._report,
             progress=self._progress,
             byte_progress=self._byte_progress,
@@ -51,26 +59,45 @@ class Syncer:
         return client, pairs
 
     def sync_pair(self, pair_name: str = None, dry_run: bool = False,
-                  mirror: bool = True) -> dict:
+                  mirror: bool = None) -> dict:
+        """Push local → server. ``mirror=None`` uses the configured sync mode."""
+        if mirror is None:
+            mirror = self.config.get_sync_mode() == "mirror"
         return self._run(pair_name, direction="push", dry_run=dry_run, mirror=mirror)
 
     def restore_pair(self, pair_name: str = None, dry_run: bool = False) -> dict:
-        return self._run(pair_name, direction="pull", dry_run=dry_run, mirror=True)
+        # Restore deliberately never mirrors: pulling from the server must not
+        # delete local files that the server happens not to have. The sync mode
+        # governs the push side only.
+        return self._run(pair_name, direction="pull", dry_run=dry_run, mirror=False)
 
     def _run(self, pair_name, direction, dry_run, mirror=True) -> dict:
         client, pairs = self._prepare(pair_name)
         verb, icon = ("Syncing", "📤") if direction == "push" else ("Restoring", "📥")
 
+        if direction == "push":
+            self._report(
+                "🪞 Mirror mode — the server will match your local folders "
+                "exactly; server-only files are deleted."
+                if mirror else
+                "➕ Update mode — new and changed files are copied; "
+                "nothing is deleted on the server."
+            )
+
         ok = 0
         failed = 0
         cancelled = False
-        totals = {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0}
+        # "unsupported" only comes back from the push side; `.get(key, 0)`
+        # below lets the pull side omit it without special-casing.
+        totals = {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0,
+                  "unsupported": 0}
         try:
             # A push dry-run only reads local disk, so don't require the server.
             if not dry_run:
                 client.connect()
-            for pair in pairs:
-                self._report(f"\n{icon} {verb}: {pair['name']}")
+            for index, pair in enumerate(pairs, start=1):
+                self._pair_progress(index, len(pairs), pair["name"], verb)
+                self._report(f"\n{icon} {verb}: {pair['name']}  ({index}/{len(pairs)})")
                 if direction == "push":
                     self._report(f"  Local:  {pair['local']}")
                     self._report(f"  Server: {pair['server']}")
@@ -95,7 +122,7 @@ class Syncer:
                     self._report(f"❌ Failed on {pair['name']}: {e}")
                     failed += 1
         finally:
-            client.disconnect()
+            client.release()
 
         if cancelled:
             self._report("\n⏹️  Cancelled.")

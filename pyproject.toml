@@ -34,17 +34,25 @@ dependencies = [
     # SMB 2/3 transport. Deliberately not pinned exactly: it carries the crypto
     # and network handling, so patch releases should reach users unimpeded.
     "smbprotocol>=1.12",
+    # Encrypts the saved-passwords file. Already present as a dependency of
+    # smbprotocol, but named here too: relying on a transitive dependency for
+    # something security-relevant means an unrelated change upstream can
+    # silently downgrade credential storage to plaintext.
+    "cryptography>=41",
+    # The Secret Service client, for the key that encrypts that file outside a
+    # Flatpak. Pure Python over jeepney, so it adds no compiled dependency.
+    # Inside a sandbox the secret portal is used instead and this goes unused.
+    # 3.5 for Collection.unlock(timeout=...). Older releases are still handled
+    # at the call site, because a pipx install made with --system-site-packages
+    # picks up the distro's copy — 3.3 on Debian 12 and Ubuntu 22.04/24.04.
+    "secretstorage>=3.5",
 ]
 
 [project.optional-dependencies]
-tui = [
-    "textual>=0.60",
-]
 dev = [
     "black==23.7.0",
     "flake8==6.0.0",
     "pytest==7.4.0",
-    "textual>=0.60",
 ]
 
 [project.urls]
@@ -57,7 +65,7 @@ Issues = "https://github.com/YuvalBogo/nasync/issues"
 nasync = "nasync.cli:main"
 
 [tool.setuptools]
-packages = ["nasync"]
+packages = ["nasync", "nasync.core", "nasync.system", "nasync.gui"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nasync.__version__"}
@@ -70,5 +78,5 @@ line-length = 100
 target-version = ["py38"]
 
 [tool.pytest.ini_options]
-testpaths = ["nasync"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
