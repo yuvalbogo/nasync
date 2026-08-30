@@ -160,10 +160,11 @@ class NasyncWindow(Adw.ApplicationWindow):
         button.set_menu_model(model)
 
     def _build_server_page(self, server: dict) -> Adw.PreferencesPage:
-        """One server: its connection details, then the pairs it owns."""
+        """One server: connection details (top), automation cards, then pairs dropdown."""
         name = server["name"]
         page = Adw.PreferencesPage()
 
+        # ──── SERVER SECTION (stays at top) ────
         details = Adw.PreferencesGroup(title="Server")
         row = Adw.ActionRow(
             title=name,
@@ -180,20 +181,140 @@ class NasyncWindow(Adw.ApplicationWindow):
         details.add(row)
         page.add(details)
 
-        pairs_group = Adw.PreferencesGroup(
-            title="Sync pairs",
-            description=f"Folders '{name}' syncs, and where they land under the share.",
-        )
-        add = Gtk.Button(icon_name="list-add-symbolic")
-        add.set_tooltip_text("Add a sync pair")
-        add.add_css_class("flat")
-        add.connect("clicked", lambda *_, s=name: self.open_pair_dialog(server_name=s))
-        pairs_group.set_header_suffix(add)
+        # ──── AUTOMATION CARDS ────
+        page.add(self._build_automation_cards(name))
+
+        # ──── SYNC PAIRS DROPDOWN ────
+        pairs_group = Adw.PreferencesGroup(title="Sync pairs")
+        self._pairs_dropdown = self._build_pairs_dropdown(name)
+        pairs_group.add(self._pairs_dropdown)
         page.add(pairs_group)
 
         self._pair_groups[name] = {"group": pairs_group, "rows": []}
         self.refresh_pairs(name)
         return page
+
+    def _build_automation_cards(self, server_name: str) -> Adw.PreferencesGroup:
+        """Cards showing quick access to popular automation settings."""
+        group = Adw.PreferencesGroup(title="Quick settings")
+
+        # Automatic sync card
+        auto_row = Adw.ActionRow(
+            title="Automatic syncing",
+            subtitle="Schedule and live sync settings",
+        )
+        auto_button = Gtk.Button(label="Edit")
+        auto_button.add_css_class("flat")
+        auto_button.connect("clicked", lambda *_: self.open_settings())
+        auto_row.add_suffix(auto_button)
+        group.add(auto_row)
+
+        # LAN-only card
+        lan_row = Adw.ActionRow(title="Sync only on home network")
+        lan_switch = Gtk.Switch()
+        lan_switch.set_active(self.config.get_automation().get("lan_only", True))
+        lan_switch.connect("notify::active", self._on_lan_only_changed)
+        lan_switch.set_valign(Gtk.Align.CENTER)
+        lan_row.add_suffix(lan_switch)
+        group.add(lan_row)
+
+        # Notifications card
+        notif_row = Adw.ActionRow(title="Sync notifications")
+        notif_switch = Gtk.Switch()
+        notif_switch.set_active(self.config.get_notifications())
+        notif_switch.connect("notify::active", self._on_notif_changed)
+        notif_switch.set_valign(Gtk.Align.CENTER)
+        notif_row.add_suffix(notif_switch)
+        group.add(notif_row)
+
+        return group
+
+    def _build_pairs_dropdown(self, server_name: str) -> Gtk.Widget:
+        """Dropdown showing sync pairs for this server."""
+        return self._build_pairs_dropdown_content(server_name)
+
+    def _build_pairs_dropdown_content(self, server_name: str) -> Gtk.Widget:
+        """Build or rebuild the pairs dropdown content."""
+        container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        container.set_margin_top(6)
+        container.set_margin_bottom(6)
+        container.set_margin_start(6)
+        container.set_margin_end(6)
+
+        # Summary row showing pair count
+        pairs = self.config.get_pairs(server_name)
+        count = len(pairs) if pairs else 0
+        summary_label = Gtk.Label(
+            label=f"{count} pair{'s' if count != 1 else ''}" if count else "No pairs yet"
+        )
+        summary_label.add_css_class("dim-label")
+
+        # Expandable section
+        expander = Gtk.Expander(label="Show all pairs")
+        expander.set_child(self._build_pairs_list(server_name))
+
+        container.append(summary_label)
+        container.append(expander)
+        return container
+
+    def _build_pairs_list(self, server_name: str) -> Gtk.Widget:
+        """Scrollable list of sync pairs for this server."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        pairs = self.config.get_pairs(server_name)
+        if not pairs:
+            row = Gtk.Label(label="Add a folder to get started")
+            row.add_css_class("dim-label")
+            box.append(row)
+        else:
+            for pair in pairs:
+                pair_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                pair_row.set_margin_start(12)
+                pair_row.set_margin_end(12)
+
+                label_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                name_label = Gtk.Label(label=pair["name"])
+                name_label.set_halign(Gtk.Align.START)
+                path_label = Gtk.Label(
+                    label=f"{pair['local']}  →  {pair['server']}"
+                )
+                path_label.add_css_class("dim-label")
+                path_label.add_css_class("caption")
+                path_label.set_halign(Gtk.Align.START)
+                label_box.append(name_label)
+                label_box.append(path_label)
+
+                spacer = Gtk.Box()
+                spacer.set_hexpand(True)
+
+                edit_btn = _icon_button("document-edit-symbolic", "Edit",
+                                       self._on_edit_pair, pair["name"], server_name)
+                remove_btn = _icon_button("user-trash-symbolic", "Remove",
+                                         self._on_remove_pair, pair["name"], server_name)
+
+                pair_row.append(label_box)
+                pair_row.append(spacer)
+                pair_row.append(edit_btn)
+                pair_row.append(remove_btn)
+                box.append(pair_row)
+
+        # Add button at bottom
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        add_row.set_margin_start(12)
+        add_row.set_margin_top(6)
+        add_btn = Gtk.Button(icon_name="list-add-symbolic")
+        add_btn.set_tooltip_text("Add a sync pair")
+        add_btn.add_css_class("flat")
+        add_btn.connect("clicked", lambda *_, s=server_name: self.open_pair_dialog(server_name=s))
+        add_row.append(add_btn)
+        add_row.append(Gtk.Label(label="Add pair"))
+        box.append(add_row)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_child(box)
+        scroll.set_max_content_height(300)
+        scroll.set_propagate_natural_height(True)
+        return scroll
 
     def _build_empty_page(self) -> Adw.StatusPage:
         page = Adw.StatusPage(
@@ -302,12 +423,11 @@ class NasyncWindow(Adw.ApplicationWindow):
         return row
 
     def _build_progress(self) -> Gtk.Widget:
-        """State centred on the bar, with the running detail underneath.
+        """State centred on the bar, with a scrollable log underneath.
 
-        The state word is the one thing to read at a glance, so it sits
-        directly above the bar rather than in a corner below it. The detail
-        line goes under the bar, where text that changes with every file can't
-        push anything else around.
+        The state word is readable at a glance above the bar. The log below
+        uses monospace font and scrolls, so file listings stay readable even
+        as they update rapidly during sync.
         """
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
 
@@ -319,26 +439,43 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._progress_bar = Gtk.ProgressBar(show_text=False)
         box.append(self._progress_bar)
 
+        # Scrollable log with monospace font for readability
+        log_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        log_container.set_margin_top(4)
+
+        log_scroll = Gtk.ScrolledWindow()
+        log_scroll.set_max_content_height(120)
+        log_scroll.set_propagate_natural_height(True)
+
+        self._progress_log = Gtk.Label(label="Pick a server, then Sync.")
+        self._progress_log.add_css_class("dim-label")
+        self._progress_log.set_selectable(True)
+        self._progress_log.set_wrap(True)
+        self._progress_log.set_halign(Gtk.Align.START)
+        self._progress_log.set_valign(Gtk.Align.START)
+        self._progress_log.set_margin_start(6)
+        self._progress_log.set_margin_end(6)
+
+        log_scroll.set_child(self._progress_log)
+        log_container.append(log_scroll)
+
         detail_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         detail_row.set_halign(Gtk.Align.CENTER)
 
-        self._progress_detail = Gtk.Label(label="Pick a server, then Sync.")
+        self._progress_detail = Gtk.Label(label="")
         self._progress_detail.add_css_class("dim-label")
         self._progress_detail.add_css_class("caption")
-        self._progress_detail.set_wrap(True)
-        self._progress_detail.set_justify(Gtk.Justification.CENTER)
+        self._progress_detail.set_visible(False)
         detail_row.append(self._progress_detail)
 
-        # Per-file failures are counted in the summary but their messages only
-        # exist in the reporter stream, so park them behind a button rather
-        # than dropping them the way a bare count would.
         self._details_button = Gtk.Button(label="Show errors")
         self._details_button.add_css_class("flat")
         self._details_button.set_visible(False)
         self._details_button.connect("clicked", lambda *_: self.show_error_details())
         detail_row.append(self._details_button)
 
-        box.append(detail_row)
+        log_container.append(detail_row)
+        box.append(log_container)
         return box
 
     # ------------------------------------------------------------------ #
@@ -388,37 +525,22 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._set_actions_sensitive(True)
 
     def refresh_pairs(self, server_name: str = None) -> None:
-        """Redraw one server's pair rows (default: the active server's)."""
+        """Refresh pairs display after changes (add/remove/edit)."""
         name = server_name or self.config.get_active_server_name()
         entry = self._pair_groups.get(name)
         if entry is None:
             return
 
-        for row in entry["rows"]:
-            entry["group"].remove(row)
-        entry["rows"] = []
-
+        group = entry["group"]
         pairs = self.config.get_pairs(name)
-        if not pairs:
-            row = Adw.ActionRow(title="No sync pairs yet",
-                                subtitle=f"Add a folder for '{name}' to sync.")
-            row.set_activatable(False)
-            entry["group"].add(row)
-            entry["rows"].append(row)
-            return
 
-        for pair in pairs:
-            row = Adw.ActionRow(title=pair["name"],
-                                subtitle=f"{pair['local']}  →  {pair['server']}")
-            row.set_subtitle_lines(1)
+        # Rebuild the pairs dropdown content
+        old_child = group.get_first_child()
+        if old_child:
+            group.remove(old_child)
 
-            row.add_suffix(_icon_button("document-edit-symbolic", "Edit",
-                                        self._on_edit_pair, pair["name"], name))
-            row.add_suffix(_icon_button("user-trash-symbolic", "Remove",
-                                        self._on_remove_pair, pair["name"], name))
-
-            entry["group"].add(row)
-            entry["rows"].append(row)
+        new_dropdown = self._build_pairs_dropdown_content(name)
+        group.add(new_dropdown)
 
     def _set_actions_sensitive(self, sensitive: bool) -> None:
         """Nothing to sync without a server, so don't offer to."""
@@ -426,6 +548,17 @@ class NasyncWindow(Adw.ApplicationWindow):
             return
         for button in (self._sync_button, self._dryrun_button, self._restore_button):
             button.set_sensitive(sensitive)
+
+    def _on_lan_only_changed(self, switch, param) -> None:
+        """Update LAN-only setting when toggle changes."""
+        automation = self.config.get_automation()
+        automation["lan_only"] = switch.get_active()
+        self.config.set_automation(automation)
+
+    def _on_notif_changed(self, switch, param) -> None:
+        """Update notification setting when toggle changes."""
+        self.config.set_notifications(switch.get_active())
+        self._notifier.enabled = switch.get_active()
 
     def refresh_summary(self) -> None:
         """Put the current state on the two buttons that also change it."""
@@ -804,7 +937,7 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._current_pair = (index, total, name)
         self._current_file = None
         self._progress_bar.set_fraction(0.0)
-        self._progress_detail.set_label(
+        self._progress_log.set_label(
             f"{name}  ·  pair {index} of {total}  ·  comparing files…"
             f"  ·  {self._elapsed()}")
 
@@ -813,7 +946,7 @@ class NasyncWindow(Adw.ApplicationWindow):
         if total:
             self._progress_bar.set_fraction(self._pair_fraction(done / total))
         counter = f"{done} of {total} files" if total else f"{done} files"
-        self._progress_detail.set_label(
+        self._progress_log.set_label(
             f"{self._pair_prefix()}{verb} {name}  ·  {counter}  ·  {self._elapsed()}")
 
     def _update_byte_progress(self, done, total, name, verb) -> None:
@@ -825,7 +958,7 @@ class NasyncWindow(Adw.ApplicationWindow):
             within = ((index - 1) + min(done / total, 1.0)) / files_total
             self._progress_bar.set_fraction(self._pair_fraction(within))
         if total:
-            self._progress_detail.set_label(
+            self._progress_log.set_label(
                 f"{self._pair_prefix()}{name} — "
                 f"{_format_bytes(done)} of {_format_bytes(total)}")
 
