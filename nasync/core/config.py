@@ -18,6 +18,29 @@ DEFAULT_SYNC_MODE = "mirror"
 # small hours: the machine is usually idle and the network quiet.
 DEFAULT_SYNC_TIME = "02:00"
 
+#: The settings that belong to a server rather than to the app, with the value
+#: an unconfigured server takes. Kept in one place because three things have to
+#: agree about them: what a new server defaults to, what the 0.18.0 migration
+#: writes, and which keys must survive `add_or_update_server` rebuilding a
+#: server entry.
+#:
+#: `mirror` is the default mode for the same reason it always was — it is what
+#: a push did before the mode existed — and both triggers default to off,
+#: because opting someone into an unattended sync that deletes on the server is
+#: not a default.
+SERVER_SETTINGS = {
+    "sync_mode": DEFAULT_SYNC_MODE,
+    "live_sync": False,
+    "scheduled_sync": False,
+    "scheduled_time": DEFAULT_SYNC_TIME,
+    # Date ("YYYY-MM-DD") of the last scheduled run that actually ran, so a
+    # missed one can catch up. Per server: one NAS being unreachable must not
+    # mark another's day as done.
+    "last_scheduled_run": None,
+    # Pre-0.5.0 "every N minutes" trigger, still honoured by `auto`.
+    "interval_minutes": 0,
+}
+
 
 def require_time(value: str) -> str:
     """Validate a user-supplied "HH:MM", raising ValueError if it isn't one."""
@@ -180,6 +203,50 @@ class Config:
             self.save()
 
         self._migrate_pairs()
+        self._migrate_server_settings()
+
+    def _migrate_server_settings(self):
+        """Move the app-wide sync mode and triggers onto the active server.
+
+        Before 0.18.0 there was one mode and one schedule, and whichever server
+        was active is the one they actually governed — so that is where they
+        belong. Runs after `_migrate_pairs` so a config coming from the
+        single-server format has a server to attach them to.
+
+        **Every other server starts with automation off.** Inheriting the old
+        triggers would begin unattended syncing on a NAS nobody asked to
+        automate, in mirror mode, which deletes. Nothing that was not syncing
+        by itself before the upgrade starts doing so because of it.
+
+        `background` stays in the global block: there is one service.
+        """
+        automation = self.data.get("automation", {})
+        movable = {key: automation[key] for key in SERVER_SETTINGS
+                   if key in automation}
+        if "sync_mode" in self.data:
+            movable["sync_mode"] = self.data["sync_mode"]
+        if not movable:
+            return
+
+        target = self._server_entry()
+        if target:
+            # setdefault, not update: a server already carrying its own value
+            # has been through this once, and the global block is the older
+            # fact. Re-running must not overwrite a since-changed setting.
+            for key, value in movable.items():
+                target.setdefault(key, value)
+
+        # Dropped whether or not there was a server to receive them: keeping
+        # them would leave two sources of truth, and with no servers there is
+        # nothing they could have been describing.
+        self.data.pop("sync_mode", None)
+        for key in SERVER_SETTINGS:
+            automation.pop(key, None)
+        if automation:
+            self.data["automation"] = automation
+        else:
+            self.data.pop("automation", None)
+        self.save()
 
     def _migrate_pairs(self):
         """Give the pre-0.6.0 global pair list to the server it was syncing to.
@@ -434,6 +501,15 @@ class Config:
             # to encrypt, turning a security improvement into an outage.
             "encrypt": bool(encrypt),
         }
+        # This rebuilds the entry from its arguments, so anything stored on the
+        # server that isn't one of them — the sync mode and the automatic-sync
+        # triggers — has to be carried over explicitly. Without this, editing a
+        # server's port in the GUI would silently switch its automation off.
+        existing = next((s for s in self.data["servers"] if s["name"] == name), None)
+        if existing:
+            entry.update({key: existing[key] for key in SERVER_SETTINGS
+                          if key in existing})
+
         self.data["servers"] = [s for s in self.data["servers"] if s["name"] != name]
         self.data["servers"].append(entry)
 
@@ -461,11 +537,21 @@ class Config:
         """
         if orig_name and orig_name != name:
             pairs = self.data["pairs_by_server"].pop(orig_name, [])
+            # Same reasoning as the pairs above: remove-then-add would drop the
+            # server's mode and triggers, so a rename would quietly stop it
+            # syncing by itself.
+            previous = self.get_server(orig_name, with_password=False) or {}
+            settings = {key: previous[key] for key in SERVER_SETTINGS
+                        if key in previous}
+
             self.remove_server(orig_name)
             self.add_or_update_server(name, ip, username, password, share, port,
                                       encrypt)
             if pairs:
                 self.data["pairs_by_server"][name] = pairs
+            if settings:
+                self._server_entry(name).update(settings)
+            if pairs or settings:
                 self.save()
         else:
             self.add_or_update_server(name, ip, username, password, share, port,
@@ -515,9 +601,13 @@ class Config:
                 return result
         return None
 
-    def get_server_config(self) -> dict:
-        """The *active* server's config (or empty fields if none configured)."""
-        name = self.get_active_server_name()
+    def get_server_config(self, server: str = None) -> dict:
+        """One server's connection details, defaulting to the active one.
+
+        Empty fields when there is no such server, so a caller can check what
+        it needs rather than handling a None.
+        """
+        name = server or self.get_active_server_name()
         server = self.get_server(name) if name else None
         if not server:
             return {"ip": None, "username": None, "password": "",
@@ -534,91 +624,164 @@ class Config:
     # ------------------------------------------------------------------ #
     # Sync mode
     # ------------------------------------------------------------------ #
-    def get_sync_mode(self) -> str:
+    def _server_entry(self, name: str = None) -> dict:
+        """The stored dict for a server, by name or the active one.
+
+        The live dict, not a copy — callers write settings through it. Returns
+        an empty throwaway when there is no such server, so reading a setting
+        with nothing configured yields the defaults instead of raising.
+        """
+        name = name or self.get_active_server_name()
+        for server in self.data.get("servers", []):
+            if server["name"] == name:
+                return server
+        return {}
+
+    def server_setting(self, key: str, server: str = None):
+        """One per-server setting, falling back to its default."""
+        return self._server_entry(server).get(key, SERVER_SETTINGS[key])
+
+    def _write_server_settings(self, server: str = None, **values) -> None:
+        """Attach settings to a server, or say why they can't be.
+
+        Refuses rather than discarding: these settings live on the server, so
+        with none configured there is nowhere to put them, and silently
+        accepting the write would report success for a change that did not
+        happen.
+        """
+        entry = self._server_entry(server)
+        if not entry:
+            named = f" '{server}'" if server else ""
+            raise ValueError(
+                f"No server{named} to apply this to. Add one with "
+                f"'nasync setup' first."
+            )
+        entry.update(values)
+        self.save()
+
+    # ------------------------------------------------------------------ #
+    # Sync mode — per server since 0.18.0
+    # ------------------------------------------------------------------ #
+    def get_sync_mode(self, server: str = None) -> str:
         """"mirror" (destination matches the source exactly) or "update".
 
-        Defaults to "mirror", which is what pushes did before the mode was
-        configurable — an existing install keeps behaving as it always has.
+        Per server: a home NAS you mirror and a work NAS you only ever add to
+        are not describable by one setting. Defaults to "mirror", which is what
+        pushes did before the mode was configurable — an existing install keeps
+        behaving as it always has.
         """
-        mode = self.data.get("sync_mode")
+        mode = self.server_setting("sync_mode", server)
         return mode if mode in SYNC_MODES else DEFAULT_SYNC_MODE
 
-    def set_sync_mode(self, mode: str) -> str:
+    def set_sync_mode(self, mode: str, server: str = None) -> str:
         if mode not in SYNC_MODES:
             raise ValueError(
                 f"Unknown sync mode '{mode}'. Use one of: {', '.join(SYNC_MODES)}."
             )
-        self.data["sync_mode"] = mode
-        self.save()
+        self._write_server_settings(server, sync_mode=mode)
         return mode
 
     # ------------------------------------------------------------------ #
     # Automation: live sync + scheduled sync
     # ------------------------------------------------------------------ #
-    def get_automation(self) -> dict:
-        """Both automatic modes, plus the legacy interval trigger.
+    def get_background(self) -> bool:
+        """The master switch for running unattended.
+
+        App-wide, not per server: there is one systemd unit (or one portal
+        autostart entry), so "run in the background" is a single fact about the
+        machine. Off means the triggers stay configured but nothing runs them,
+        which is the *Paused* state the front-ends report.
+        """
+        return bool(self.data.get("automation", {}).get("background", True))
+
+    def set_background(self, enabled: bool) -> bool:
+        automation = self.data.setdefault("automation", {})
+        automation["background"] = bool(enabled)
+        self.save()
+        return automation["background"]
+
+    def get_automation(self, server: str = None) -> dict:
+        """One server's automatic-sync settings, plus the global master switch.
+
+        Per server since 0.18.0 — the triggers, the time and the catch-up date
+        all belong to the NAS they sync. `background` is the exception and is
+        app-wide; it is returned here because every caller that asks about the
+        triggers also has to know whether anything is allowed to run them.
 
         Live sync and scheduled sync are **off** by default: an automatic sync
         that deletes on the server is not something to opt someone into.
         """
-        a = self.data.get("automation", {})
+        entry = self._server_entry(server)
         return {
             # Sync a few seconds after files stop changing, when on the LAN.
-            "live_sync": bool(a.get("live_sync", False)),
+            "live_sync": bool(entry.get("live_sync", False)),
             # Sync once a day at "HH:MM".
-            "scheduled_sync": bool(a.get("scheduled_sync", False)),
-            # Master switch for running unattended. Off means the triggers stay
-            # configured but nothing runs them, so automatic syncing pauses.
-            "background": bool(a.get("background", True)),
-            "scheduled_time": normalize_time(a.get("scheduled_time"), DEFAULT_SYNC_TIME),
-            # Date ("YYYY-MM-DD") of the last scheduled run that actually ran,
-            # so a missed one (asleep, or away from home) can catch up.
-            "last_scheduled_run": a.get("last_scheduled_run"),
-            # Pre-0.5.0 "every N minutes" trigger, still honoured by `auto`.
-            "interval_minutes": int(a.get("interval_minutes", 0)),
+            "scheduled_sync": bool(entry.get("scheduled_sync", False)),
+            "background": self.get_background(),
+            "scheduled_time": normalize_time(entry.get("scheduled_time"),
+                                             DEFAULT_SYNC_TIME),
+            "last_scheduled_run": entry.get("last_scheduled_run"),
+            "interval_minutes": int(entry.get("interval_minutes", 0) or 0),
         }
 
     def set_automation(self, live_sync=None, scheduled_sync=None,
                        scheduled_time=None, interval_minutes=None,
-                       last_scheduled_run=None, background=None) -> dict:
-        a = self.get_automation()
-        if live_sync is not None:
-            a["live_sync"] = bool(live_sync)
-        if scheduled_sync is not None:
-            a["scheduled_sync"] = bool(scheduled_sync)
+                       last_scheduled_run=None, background=None,
+                       server: str = None) -> dict:
+        """Write any subset of one server's triggers. `background` is global."""
         if background is not None:
-            a["background"] = bool(background)
-        if scheduled_time is not None:
-            a["scheduled_time"] = require_time(scheduled_time)
-        if interval_minutes is not None:
-            a["interval_minutes"] = int(interval_minutes)
-        if last_scheduled_run is not None:
-            a["last_scheduled_run"] = last_scheduled_run
-        self.data["automation"] = a
-        self.save()
-        return a
+            self.set_background(background)
 
-    def record_scheduled_run(self, date_str: str) -> None:
-        """Mark today's scheduled sync as done.
+        values = {}
+        if live_sync is not None:
+            values["live_sync"] = bool(live_sync)
+        if scheduled_sync is not None:
+            values["scheduled_sync"] = bool(scheduled_sync)
+        if scheduled_time is not None:
+            values["scheduled_time"] = require_time(scheduled_time)
+        if interval_minutes is not None:
+            values["interval_minutes"] = int(interval_minutes)
+        if last_scheduled_run is not None:
+            values["last_scheduled_run"] = last_scheduled_run
+        if values:
+            self._write_server_settings(server, **values)
+        return self.get_automation(server)
+
+    def record_scheduled_run(self, date_str: str, server: str = None) -> None:
+        """Mark today's scheduled sync as done, for one server.
 
         The daemon writes this while the GUI may be writing settings, so the
         file is re-read first — otherwise a stale in-memory copy would undo
         whatever the user just changed.
         """
+        name = server or self.get_active_server_name()
         self._load()
-        automation = self.data.get("automation", {})
-        automation["last_scheduled_run"] = date_str
-        self.data["automation"] = automation
-        self.save()
+        self._write_server_settings(name, last_scheduled_run=date_str)
 
-    def automation_wanted(self) -> bool:
-        """True when at least one automatic trigger is configured."""
-        a = self.get_automation()
+    def automated_servers(self) -> list:
+        """Names of the servers with at least one trigger switched on.
+
+        What the daemon iterates. A server with nothing on is not merely idle —
+        it is not watched, not scheduled, and costs nothing.
+        """
+        return [server["name"] for server in self.data.get("servers", [])
+                if self.automation_wanted(server["name"])]
+
+    def automation_wanted(self, server: str = None) -> bool:
+        """True when a trigger is configured — for one server, or for any.
+
+        Passing no server asks the app-wide question ("is anything automated at
+        all?"), which is what decides whether the background service is needed.
+        """
+        if server is None:
+            return any(self.automation_wanted(s["name"])
+                       for s in self.data.get("servers", []))
+        a = self.get_automation(server)
         return a["live_sync"] or a["scheduled_sync"] or a["interval_minutes"] > 0
 
     def background_service_wanted(self) -> bool:
-        """True when a trigger is on *and* the user wants it running unattended."""
-        return self.get_automation()["background"] and self.automation_wanted()
+        """True when some server has a trigger on *and* unattended is allowed."""
+        return self.get_background() and self.automation_wanted()
 
     # ------------------------------------------------------------------ #
     # Portal grant — recorded, not chosen

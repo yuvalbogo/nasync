@@ -2,6 +2,68 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.0] - 2026-08-30
+
+**The sync mode and the automatic-sync triggers now belong to a server rather
+than to the app.** A home NAS you mirror on a schedule and a work NAS you only
+ever push to by hand were never describable by one setting, and until now the
+background service only ever automated whichever server happened to be
+*active* — so a second NAS was never automated at all.
+
+### Added
+- **Per-server sync mode and triggers.** Each server carries its own
+  `sync_mode`, live sync, scheduled sync and time, stored on the server entry
+  beside `encrypt`, which was already per-server. They survive editing and
+  renaming a server.
+- **`--server NAME`** on `nasync mode`, `nasync live-sync`,
+  `nasync scheduled-sync` and `nasync auto`, defaulting to the active server
+  the same way `nasync add` and `nasync encryption` already did.
+- **`nasync auto` drives every automated server**, each with its own mode,
+  schedule, catch-up date and network check, from one loop. Syncs stay
+  serialised — watchers run per server, but only one sync happens at a time,
+  which is the "syncs never overlap" guarantee the automation layer has always
+  made. A server automated while the service is running is picked up without a
+  restart.
+- **`NASYNC_DEBUG=1`** prints a traceback when a background sync fails. The
+  message alone had proved not to be enough: an unattended failure is read days
+  later in the journal with no way to tell where it came from.
+
+### Changed
+- **The desktop app gives each server two tabs**, *Server* (its details and
+  sync pairs) and *Settings* (its mode and triggers). Servers moved into the
+  header, since they are the outer scope; the tab you are on is remembered when
+  you switch between them.
+- **The menu's *Settings* is now *App settings…***, and holds only what is
+  genuinely app-wide: running in the background, notifications, and how saved
+  passwords are protected. Everything per-server left it.
+- **`nasync status` reports the mode per server** and lists each automated
+  server's triggers, instead of one app-wide block that could only ever have
+  been describing one of them.
+
+### Migration
+- On first run, the old app-wide mode and triggers move to **the active server
+  only**. Every other server starts with automation off. Nothing that was not
+  syncing by itself before the upgrade starts doing so because of it —
+  inheriting a trigger would have begun unattended syncing on a NAS nobody
+  asked to automate, in mirror mode, which deletes.
+- `background` and notifications stay app-wide and are untouched.
+- **Downgrade note:** an older NASync reading a migrated config finds no
+  app-wide automation block and treats everything as off, rather than
+  misbehaving.
+
+### Fixed
+- **Editing a server wiped its sync settings.** `add_or_update_server` rebuilds
+  the entry from its arguments, so changing a port would have silently switched
+  that server's automation off. Renaming did the same, via the remove-then-add
+  path — the bug the code already guarded against for sync pairs.
+- **The mode was read app-wide while the connection came from one server.**
+  `Syncer` now takes the server it is syncing, so a push cannot take one
+  server's rule about deleting and another's files.
+- Writing a per-server setting with no server configured now says so instead of
+  silently discarding the write and reporting success.
+- The daemon no longer treats its own recording of a scheduled run as a user
+  edit, which had it reload the config and reset every interval timer.
+
 ## [0.17.0] - 2026-08-30
 
 The desktop app rearranged around what it is actually for. NASync is

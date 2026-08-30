@@ -75,7 +75,18 @@ def scheduled_run_is_due(scheduled_time: str, last_run: str, now=None) -> bool:
 
 
 class Automator:
-    """Runs the automatic triggers until stopped."""
+    """One server's automatic triggers: its watchers, schedule and LAN state.
+
+    Since 0.18.0 the triggers belong to a server rather than to the app, so
+    this is per server — its own answer to "am I on that NAS's network?", its
+    own catch-up date, its own watched folders. `AutomationRunner` owns the
+    loop that drives one of these per automated server.
+
+    The sync lock is shared between them on purpose: watchers run concurrently,
+    but only one sync happens at a time. Two servers syncing at once would
+    contend for the same uplink and break the "syncs never overlap" guarantee
+    this module's docstring makes.
+    """
 
     # How long to wait before re-checking a config file that hasn't changed.
     TICK = 1.0
@@ -92,13 +103,20 @@ class Automator:
     # hammered with a full sync attempt per second until midnight.
     SCHEDULED_RETRY_SECONDS = 900.0
 
-    def __init__(self, reporter=print, config=None, notifier=None):
+    def __init__(self, reporter=print, config=None, notifier=None,
+                 server: str = None, sync_lock=None):
         self.config = config or Config()
+        #: Which server this drives; None means the active one, which is what
+        #: `nasync watch` and every pre-0.18.0 caller mean.
+        self.server = server
         self._report = reporter
-        self._sync_lock = threading.Lock()
+        # Shared when a runner drives several servers, so one sync at a time.
+        self._sync_lock = sync_lock or threading.Lock()
+        # Shared with the runner that drives this automator, so `stop()` on
+        # either reaches the loop.
         self._stop = threading.Event()
-        self._config_mtime = None
         self._only_pair = None      # `nasync watch --pair` narrows to just one
+        self._overrides = {}        # CLI flags that beat the saved settings
         self._lan_state = False
         self._lan_checked_at = None
         self._reported_lan = None   # None = nothing said yet, so the first
@@ -123,7 +141,7 @@ class Automator:
                 and now - self._lan_checked_at < self.LAN_CACHE_TTL):
             return self._lan_state
 
-        server = self.config.get_server_config()
+        server = self.config.get_server_config(self.server)
         state = bool(server.get("ip")) and lan.on_lan(server["ip"],
                                                       server.get("port", 445))
         self._lan_state = state
@@ -189,8 +207,8 @@ class Automator:
             # The Automator's Config, not a fresh one: `_settings_changed`
             # reloads it when the file changes, and a Syncer that built
             # its own would sync from the settings as they were at start.
-            result = Syncer(reporter=self._report,
-                            config=self.config).sync_pair(self._only_pair)
+            result = Syncer(reporter=self._report, config=self.config,
+                            server=self.server).sync_pair(self._only_pair)
             self._notify_finished(result)
             if not result.get("ok"):
                 # Nothing got through. Reported as such on the scheduled path so
@@ -209,6 +227,12 @@ class Automator:
             return True
         except Exception as e:
             self._report(f"❌ {e}")
+            # The message alone has proved not to be enough: a background
+            # failure is seen days later in the journal, with no way to tell
+            # where it came from. Opt-in so the normal log stays readable.
+            if os.environ.get("NASYNC_DEBUG"):
+                import traceback
+                self._report(traceback.format_exc())
             if scheduled:
                 self._notify_scheduled_blocked(str(e))
             else:
@@ -230,7 +254,7 @@ class Automator:
         if self._lan_reason_text and self._lan_reason_at == self._lan_checked_at:
             return self._lan_reason_text
 
-        server = self.config.get_server_config()
+        server = self.config.get_server_config(self.server)
         self._lan_reason_text = (
             lan.describe(server["ip"], server.get("port", 445))
             if server.get("ip") else "No server selected.")
@@ -238,7 +262,7 @@ class Automator:
         return self._lan_reason_text
 
     def _server_label(self) -> str:
-        return self.config.get_active_server_name() or "your NAS"
+        return self.server or self.config.get_active_server_name() or "your NAS"
 
     def _notify_started(self, trigger: str) -> None:
         self._notifier.notify(
@@ -285,7 +309,7 @@ class Automator:
     # Watching
     # ------------------------------------------------------------------ #
     def _watched_pairs(self):
-        pairs = self.config.get_pairs()
+        pairs = self.config.get_pairs(self.server)
         if self._only_pair:
             pairs = [p for p in pairs if p["name"] == self._only_pair]
         return pairs
@@ -315,11 +339,8 @@ class Automator:
             observer.join()
 
     # ------------------------------------------------------------------ #
-    # Main loop
+    # What the loop asks of one server
     # ------------------------------------------------------------------ #
-    def stop(self):
-        self._stop.set()
-
     def _scheduled_retry_due(self) -> bool:
         """False only while backing off after a scheduled run that got nowhere.
 
@@ -332,6 +353,109 @@ class Automator:
             return False
         self._scheduled_retry_at = None
         return True
+
+    def settings(self) -> dict:
+        """This server's triggers, with any CLI overrides applied on top."""
+        values = self.config.get_automation(self.server)
+        values.update({k: v for k, v in self._overrides.items() if v is not None})
+        return values
+
+    def wants_automation(self, settings=None) -> bool:
+        current = settings or self.settings()
+        return bool(current["live_sync"] or current["scheduled_sync"]
+                    or current["interval_minutes"] > 0)
+
+    def has_pairs(self) -> bool:
+        return bool(self._watched_pairs())
+
+    def label(self) -> str:
+        return self._server_label()
+
+    def scheduled_due(self, settings) -> bool:
+        """True when this server owes today's scheduled run and may retry now."""
+        return (settings["scheduled_sync"]
+                and self._scheduled_retry_due()
+                and scheduled_run_is_due(settings["scheduled_time"],
+                                         settings["last_scheduled_run"]))
+
+    def run_scheduled(self, settings) -> None:
+        """Attempt the day's run, and record it only if something got through.
+
+        A run where every pair failed leaves the day due — deliberately, so it
+        catches up — but backs off, because the loop ticks once a second and
+        would otherwise hammer a NAS that is rejecting everything until
+        midnight.
+        """
+        if self.sync_now(f"scheduled {settings['scheduled_time']}", scheduled=True):
+            self._scheduled_retry_at = None
+            self.config.record_scheduled_run(
+                datetime.date.today().isoformat(), server=self.server)
+        else:
+            self._scheduled_retry_at = (time.monotonic()
+                                        + self.SCHEDULED_RETRY_SECONDS)
+
+    def refresh_notifier(self) -> None:
+        self._notifier.enabled = self.config.get_notifications()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self, live_sync=None, scheduled_sync=None, scheduled_time=None,
+            interval_minutes=None, only_pair=None, sync_at_start=None):
+        """Run this one server until stopped. Arguments override its settings.
+
+        The single-server entry point, which is what `nasync watch` wants: one
+        NAS, in the foreground, with flags that beat the saved settings and
+        change nothing on disk. `nasync auto` drives `AutomationRunner` across
+        every automated server instead.
+        """
+        self._only_pair = only_pair
+        self._overrides = {
+            "live_sync": live_sync,
+            "scheduled_sync": scheduled_sync,
+            "scheduled_time": scheduled_time,
+            "interval_minutes": interval_minutes,
+        }
+        return AutomationRunner([self], config=self.config,
+                                reporter=self._report,
+                                stop_event=self._stop).run(sync_at_start=sync_at_start)
+
+
+class _WatchState:
+    """What the loop has to remember about one server between ticks."""
+
+    def __init__(self, automator):
+        self.automator = automator
+        self.observer = None
+        self.handlers = []
+        self.watching = False
+        self.next_interval_tick = None
+
+
+class AutomationRunner:
+    """Drives one `Automator` per automated server from a single loop.
+
+    One loop rather than a thread per server, because the expensive thing —
+    the sync itself — is serialised anyway: they share a lock so that syncs
+    never overlap, which is what this module promises. Watchers are cheap and
+    do run concurrently, so a burst of edits on one NAS cannot defer another's
+    schedule.
+
+    Each server keeps its own catch-up date, so one being unreachable never
+    marks another's day as done.
+    """
+
+    TICK = 1.0
+
+    def __init__(self, automators, config=None, reporter=print, stop_event=None):
+        self._states = [_WatchState(a) for a in automators]
+        self.config = config or Config()
+        self._report = reporter
+        self._stop = stop_event or threading.Event()
+        self._config_mtime = None
+
+    def stop(self):
+        self._stop.set()
 
     def _settings_changed(self) -> bool:
         """True when config.json has been rewritten since we last looked.
@@ -348,74 +472,93 @@ class Automator:
             return False
         self._config_mtime = mtime
         self.config.reload()
-        self._notifier.enabled = self.config.get_notifications()
+        for state in self._states:
+            state.automator.refresh_notifier()
         return True
 
-    def run(self, live_sync=None, scheduled_sync=None, scheduled_time=None,
-            interval_minutes=None, only_pair=None, sync_at_start=None):
-        """Run until stopped. Arguments override the saved settings.
+    # ------------------------------------------------------------------ #
+    # Watching
+    # ------------------------------------------------------------------ #
+    def _sync_watchers(self, state, wants_live: bool) -> None:
+        """Start or stop one server's watchers to match its live-sync setting."""
+        if wants_live and not state.watching:
+            state.observer, state.handlers = state.automator._start_watching()
+            state.watching = True
+        elif not wants_live and state.watching:
+            state.automator._stop_watching(state.observer, state.handlers)
+            state.observer, state.handlers = None, []
+            state.watching = False
+            self._report(f"👁️  Live sync switched off for {state.automator.label()}")
 
-        `sync_at_start` defaults to **only when live sync is on**, which is a
-        deliberate narrowing. This process is restarted far more often than it
-        looks: `service.apply()` restarts the unit after any automation setting
-        change, and the systemd unit restarts it on failure every 30 seconds.
-        Syncing unconditionally on start therefore meant that changing the
-        *scheduled time* — a setting whose entire purpose is to defer work —
-        immediately performed a full sync, in mirror mode, deleting on the
-        server. Nobody asked for that and nobody is watching when it happens.
+    def _stop_all_watchers(self) -> None:
+        for state in self._states:
+            if state.watching or state.observer:
+                state.automator._stop_watching(state.observer, state.handlers)
+                state.observer, state.handlers, state.watching = None, [], False
+
+    # ------------------------------------------------------------------ #
+    # Main loop
+    # ------------------------------------------------------------------ #
+    def run(self, sync_at_start=None):
+        """Run until stopped.
+
+        `sync_at_start` defaults to **only when live sync is on**, per server,
+        which is a deliberate narrowing. This process is restarted far more
+        often than it looks: `service.apply()` restarts the unit after any
+        automation setting change, and the systemd unit restarts it on failure
+        every 30 seconds. Syncing unconditionally on start therefore meant that
+        changing the *scheduled time* — a setting whose entire purpose is to
+        defer work — immediately performed a full sync, in mirror mode,
+        deleting on the server. Nobody asked for that and nobody is watching
+        when it happens.
 
         Live sync is the one trigger with a genuine gap to fill: watchdog only
         sees changes made while it is running, so edits made while the service
         was down would otherwise wait for a later edit. A schedule-only
-        configuration has no such gap — it has a slot, and `scheduled_run_is_due`
-        already catches up a missed one.
+        configuration has no such gap — it has a slot, and
+        `scheduled_run_is_due` already catches up a missed one.
 
         Pass it explicitly to force either behaviour.
         """
-        self._only_pair = only_pair
-        overrides = {
-            "live_sync": live_sync,
-            "scheduled_sync": scheduled_sync,
-            "scheduled_time": scheduled_time,
-            "interval_minutes": interval_minutes,
-        }
-
-        def settings():
-            values = self.config.get_automation()
-            values.update({k: v for k, v in overrides.items() if v is not None})
-            return values
-
         self._settings_changed()             # prime the mtime
-        current = settings()
-        if not (current["live_sync"] or current["scheduled_sync"]
-                or current["interval_minutes"] > 0):
+        runnable = [s for s in self._states if self._runnable(s)]
+        if not any(s.automator.wants_automation() for s in self._states):
             raise Exception(
                 "Nothing to automate — live sync and scheduled sync are both "
-                "off. Turn one on in the desktop app's Settings, or with "
+                "off. Turn one on in the desktop app, or with "
                 "'nasync live-sync on' / 'nasync scheduled-sync on'."
             )
-        if not self.config.get_pairs():
+        # A server with no folders is skipped rather than fatal: with several
+        # servers, one half-configured NAS must not stop the others syncing.
+        for state in self._states:
+            if state.automator.wants_automation() and not state.automator.has_pairs():
+                self._report(f"⚠️  Nothing to sync for "
+                             f"'{state.automator.label()}' — no sync pairs.")
+        if not runnable:
             raise Exception("No sync pairs configured. Run 'nasync setup' first.")
 
-        observer = handlers = None
-        watching = False
         try:
-            if current["live_sync"]:
-                observer, handlers = self._start_watching()
-                watching = True
-            if current["scheduled_sync"]:
-                self._report(f"📅 Scheduled sync every day at {current['scheduled_time']}")
-            if current["interval_minutes"] > 0:
-                self._report(f"⏱️  Also syncing every {current['interval_minutes']} min")
+            for state in runnable:
+                current = state.automator.settings()
+                label = state.automator.label()
+                self._sync_watchers(state, current["live_sync"])
+                if current["scheduled_sync"]:
+                    self._report(f"📅 {label}: scheduled sync every day at "
+                                 f"{current['scheduled_time']}")
+                if current["interval_minutes"] > 0:
+                    self._report(f"⏱️  {label}: also syncing every "
+                                 f"{current['interval_minutes']} min")
+                    state.next_interval_tick = (time.monotonic()
+                                                + current["interval_minutes"] * 60)
+
             self._report("Automation running — press Ctrl+C to stop.")
 
-            catch_up = (bool(current["live_sync"]) if sync_at_start is None
-                        else bool(sync_at_start))
-            if catch_up:
-                self.sync_now("startup")
-
-            interval = current["interval_minutes"]
-            next_tick = time.monotonic() + interval * 60 if interval > 0 else None
+            for state in runnable:
+                current = state.automator.settings()
+                catch_up = (bool(current["live_sync"]) if sync_at_start is None
+                            else bool(sync_at_start))
+                if catch_up:
+                    state.automator.sync_now("startup")
 
             while not self._stop.is_set():
                 self._stop.wait(self.TICK)
@@ -423,41 +566,70 @@ class Automator:
                     break
 
                 # Pick up switches flipped in the desktop app while we run.
-                if self._settings_changed():
-                    current = settings()
-                    if current["live_sync"] and not watching:
-                        observer, handlers = self._start_watching()
-                        watching = True
-                    elif not current["live_sync"] and watching:
-                        self._stop_watching(observer, handlers)
-                        observer = handlers = None
-                        watching = False
-                        self._report("👁️  Live sync switched off")
-                    interval = current["interval_minutes"]
-                    next_tick = (time.monotonic() + interval * 60) if interval > 0 else None
+                changed = self._settings_changed()
 
-                if (current["scheduled_sync"]
-                        and self._scheduled_retry_due()
-                        and scheduled_run_is_due(current["scheduled_time"],
-                                                 current["last_scheduled_run"])):
-                    if self.sync_now(f"scheduled {current['scheduled_time']}",
-                                     scheduled=True):
-                        self._scheduled_retry_at = None
-                        today = datetime.date.today().isoformat()
-                        self.config.record_scheduled_run(today)
-                        # We just wrote the file; don't treat it as a change.
+                # Re-evaluated every tick, over *every* server rather than the
+                # set that was automated at startup: turning a trigger on for a
+                # second NAS has to take effect in a running service, which is
+                # what the docs promise and what a foreground `nasync auto`
+                # would otherwise never notice.
+                for state in self._states:
+                    current = state.automator.settings()
+                    live = self._runnable(state) and current["live_sync"]
+                    if changed:
+                        self._sync_watchers(state, live)
+                        state.next_interval_tick = (
+                            time.monotonic() + current["interval_minutes"] * 60
+                            if current["interval_minutes"] > 0 else None)
+
+                    if not self._runnable(state):
+                        continue
+
+                    if state.automator.scheduled_due(current):
+                        state.automator.run_scheduled(current)
+                        # We just wrote the run date; that's our own edit, not
+                        # the user's, so don't spend the next tick reloading
+                        # and resetting every interval timer because of it.
                         self._settings_changed()
-                        current = settings()
-                    else:
-                        # Still due — deliberately, so it catches up — but not
-                        # again immediately. See SCHEDULED_RETRY_SECONDS.
-                        self._scheduled_retry_at = (time.monotonic()
-                                                    + self.SCHEDULED_RETRY_SECONDS)
 
-                if next_tick and time.monotonic() >= next_tick:
-                    self.sync_now("interval")
-                    next_tick = time.monotonic() + interval * 60
+                    if (state.next_interval_tick
+                            and time.monotonic() >= state.next_interval_tick):
+                        state.automator.sync_now("interval")
+                        state.next_interval_tick = (
+                            time.monotonic() + current["interval_minutes"] * 60)
         except KeyboardInterrupt:
             self._report("\n⏹️  Stopping automation…")
         finally:
-            self._stop_watching(observer, handlers or [])
+            self._stop_all_watchers()
+
+    @staticmethod
+    def _runnable(state) -> bool:
+        """A server with a trigger on and somewhere to sync from."""
+        return (state.automator.wants_automation()
+                and state.automator.has_pairs())
+
+
+def run_all(reporter=print, config=None, notifier=None, sync_at_start=None):
+    """Automate every server that has a trigger switched on.
+
+    The entry point for `nasync auto`, and the reason the settings moved onto
+    servers: before 0.18.0 this ran whichever server happened to be active, so
+    a second NAS was never automated at all.
+    """
+    config = config or Config()
+    lock = threading.Lock()
+    # One per *configured* server, not per currently-automated one: an
+    # automator holds nothing but state until a trigger turns on, and building
+    # them all is what lets the loop notice a server being automated while it
+    # runs. The runner refuses to start if none of them has a trigger.
+    automators = [
+        Automator(reporter=reporter, config=config, notifier=notifier,
+                  server=server["name"], sync_lock=lock)
+        for server in config.list_servers()
+    ]
+    if not automators:
+        raise Exception(
+            "No servers configured. Run 'nasync setup' first."
+        )
+    return AutomationRunner(automators, config=config,
+                            reporter=reporter).run(sync_at_start=sync_at_start)

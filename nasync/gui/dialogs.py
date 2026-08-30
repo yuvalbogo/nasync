@@ -77,8 +77,13 @@ class AutomationSettings:
     #: short enough that nobody notices waiting for it.
     TIME_COMMIT_DELAY_MS = 700
 
-    def __init__(self, config, on_changed=None, on_detail=None):
+    def __init__(self, config, on_changed=None, on_detail=None, server=None):
         self._config = config
+        #: Which server these belong to; None means the active one. The
+        #: triggers are per server since 0.18.0, so a panel that didn't know
+        #: which one it was editing would write to whichever happened to be
+        #: active when the user clicked.
+        self.server = server
         self._on_changed = on_changed
         # Called with the service's one-line status whenever it might have
         # changed; each surface renders it in whatever widget it keeps for it.
@@ -91,7 +96,7 @@ class AutomationSettings:
         return self._config
 
     def get(self) -> dict:
-        return self._config.get_automation()
+        return self._config.get_automation(self.server)
 
     # -- writes --------------------------------------------------------- #
     def set_live(self, value: bool) -> None:
@@ -124,7 +129,8 @@ class AutomationSettings:
 
     def _commit_time(self) -> bool:
         self._time_commit = None
-        self._config.set_automation(scheduled_time=self._pending_time)
+        self._config.set_automation(scheduled_time=self._pending_time,
+                                    server=self.server)
         self._pending_time = None
         # Only worth reconciling the service if it's actually scheduling.
         if self.get()["scheduled_sync"]:
@@ -138,7 +144,7 @@ class AutomationSettings:
         self._changed("notifications")
 
     def _write(self, **values) -> None:
-        self._config.set_automation(**values)
+        self._config.set_automation(server=self.server, **values)
         self.reconcile()
 
     # -- the background service ----------------------------------------- #
@@ -238,9 +244,10 @@ class SyncModeRow(Adw.ComboRow):
     is selected, which is what a bare label reading "Mirror" never did.
     """
 
-    def __init__(self, config, on_changed=None):
+    def __init__(self, config, on_changed=None, server=None):
         super().__init__(title="Sync mode")
         self._config = config
+        self.server = server
         self._on_changed = on_changed
         self._modes = [mode for mode, _, _ in SYNC_MODE_CHOICES]
 
@@ -253,7 +260,7 @@ class SyncModeRow(Adw.ComboRow):
 
     def reload(self) -> None:
         """Re-read the mode; the other surface may have changed it."""
-        mode = self._config.get_sync_mode()
+        mode = self._config.get_sync_mode(self.server)
         if mode in self._modes:
             self.set_selected(self._modes.index(mode))
         self._show_consequence()
@@ -265,9 +272,9 @@ class SyncModeRow(Adw.ComboRow):
         mode = self._modes[self.get_selected()]
         self._show_consequence()
         # Selecting the mode that is already set happens on every reload().
-        if mode == self._config.get_sync_mode():
+        if mode == self._config.get_sync_mode(self.server):
             return
-        self._config.set_sync_mode(mode)
+        self._config.set_sync_mode(mode, server=self.server)
         if self._on_changed:
             self._on_changed(mode)
 
@@ -284,13 +291,14 @@ class AutomationRows:
     an expander.
     """
 
-    def __init__(self, config, on_changed=None, on_summary=None):
+    def __init__(self, config, on_changed=None, on_summary=None, server=None):
         self._on_summary = on_summary
+        self.server = server
         # Set while reload() writes the config's values into the switches, so
         # that echoing what we just read doesn't get written straight back.
         self._loading = False
         self.settings = AutomationSettings(
-            config, on_changed=on_changed,
+            config, on_changed=on_changed, server=server,
             on_detail=self._set_service_detail)
 
         automation = self.settings.get()
@@ -298,15 +306,13 @@ class AutomationRows:
         self.scheduled = switch_row("scheduled", automation["scheduled_sync"],
                                     self._on_scheduled)
         self.time = self._build_time_row(automation["scheduled_time"])
-        self.background = switch_row("background", automation["background"],
-                                     self._on_background)
-        self.notifications = switch_row("notifications",
-                                        config.get_notifications(),
-                                        self._on_notifications)
 
-        #: In display order. Notifications is kept out: it is about being told
-        #: what happened, not about when a sync runs.
-        self.rows = (self.live, self.scheduled, self.time, self.background)
+        #: In display order. `background` and `notifications` are deliberately
+        #: absent: there is one systemd unit and one notification preference for
+        #: the whole app, so repeating them under every server would offer a
+        #: per-server choice that does not exist. They live in
+        #: `GlobalAutomationRows`.
+        self.rows = (self.live, self.scheduled, self.time)
         self.refresh()
 
     def _build_time_row(self, value: str) -> Adw.ActionRow:
@@ -353,12 +359,8 @@ class AutomationRows:
         return " · ".join(parts)
 
     def refresh(self) -> None:
-        """Time only matters when scheduling; the service only when either is on."""
-        automation = self.settings.get()
-        self.time.set_sensitive(automation["scheduled_sync"])
-        detail, available = self.settings.service_state(automation)
-        self.background.set_sensitive(available)
-        self.background.set_subtitle(detail)
+        """Time only matters when this server is actually scheduling."""
+        self.time.set_sensitive(self.settings.get()["scheduled_sync"])
         self._publish_summary()
 
     def reload(self) -> None:
@@ -372,9 +374,6 @@ class AutomationRows:
         try:
             self.live.set_active(automation["live_sync"])
             self.scheduled.set_active(automation["scheduled_sync"])
-            self.background.set_active(automation["background"])
-            self.notifications.set_active(
-                self.settings.config.get_notifications())
             hour, minute = (int(part)
                             for part in self.settings.scheduled_time.split(":"))
             self._hour_spin.set_value(hour)
@@ -387,8 +386,9 @@ class AutomationRows:
         if self._on_summary:
             self._on_summary(self.summary())
 
-    def _set_service_detail(self, detail: str) -> None:
-        self.background.set_subtitle(detail)
+    def _set_service_detail(self, _detail: str) -> None:
+        # The service's own words belong to the global panel that owns that
+        # switch; here it only changes whether this server reads as Paused.
         self._publish_summary()
 
     def _on_live(self, row, _param) -> None:
@@ -403,6 +403,53 @@ class AutomationRows:
         self.settings.set_scheduled(row.get_active())
         self.refresh()
 
+    def _on_time(self, _spin) -> None:
+        if self._loading:
+            return
+        self.settings.set_time(
+            f"{int(self._hour_spin.get_value()):02d}:"
+            f"{int(self._minute_spin.get_value()):02d}")
+        self._publish_summary()
+
+
+class GlobalAutomationRows:
+    """The automation settings that are one fact about the machine.
+
+    `Run in the background` is a single systemd unit (or one portal autostart
+    entry) and notifications are a desktop-wide preference, so neither can be
+    per server. They live here, apart from `AutomationRows`, so that the
+    per-server Settings tab cannot offer a choice that does not exist.
+    """
+
+    def __init__(self, config, on_changed=None):
+        self._loading = False
+        self.settings = AutomationSettings(
+            config, on_changed=on_changed,
+            on_detail=lambda detail: self.background.set_subtitle(detail))
+
+        self.background = switch_row("background", config.get_background(),
+                                     self._on_background)
+        self.notifications = switch_row("notifications",
+                                        config.get_notifications(),
+                                        self._on_notifications)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """The service only matters once some server has a trigger on."""
+        detail, available = self.settings.service_state()
+        self.background.set_sensitive(available)
+        self.background.set_subtitle(detail)
+
+    def reload(self) -> None:
+        self._loading = True
+        try:
+            self.background.set_active(self.settings.config.get_background())
+            self.notifications.set_active(
+                self.settings.config.get_notifications())
+        finally:
+            self._loading = False
+        self.refresh()
+
     def _on_background(self, row, _param) -> None:
         if self._loading:
             return
@@ -414,22 +461,14 @@ class AutomationRows:
             return
         self.settings.set_notifications(row.get_active())
 
-    def _on_time(self, _spin) -> None:
-        if self._loading:
-            return
-        self.settings.set_time(
-            f"{int(self._hour_spin.get_value()):02d}:"
-            f"{int(self._minute_spin.get_value()):02d}")
-        self._publish_summary()
 
+class AppSettingsDialog(Adw.PreferencesDialog):
+    """The settings that belong to the app rather than to a server.
 
-class SettingsDialog(Adw.PreferencesDialog):
-    """App settings in full: the sync mode, automatic syncing, notifications.
-
-    The main page carries the same mode and automation rows — the same row
-    objects, from `SyncModeRow` and `AutomationRows` — for reading at a glance.
-    This is where they live with room around them, alongside the credential
-    security summary the page does not carry.
+    Sync mode and the automatic-sync triggers are per server since 0.18.0 and
+    live on that server's Settings tab. What is left is genuinely app-wide:
+    one background service, one notification preference, and one answer about
+    how saved passwords are protected on this machine.
 
     Instant-apply, as the GNOME HIG expects of a preferences window: there is
     no Save button, a change writes to the config straight away and calls
@@ -440,46 +479,42 @@ class SettingsDialog(Adw.PreferencesDialog):
         super().__init__()
         self._config = config
         self._on_changed = on_changed
-        self._rows = AutomationRows(config, on_changed=self._changed)
-        self._automation = self._rows.settings
+        self._rows = GlobalAutomationRows(config, on_changed=self._changed)
 
-        self.set_title("Settings")
-        # Two pages rather than one long scroll: what a sync does is a
-        # different question from when one happens.
-        page = Adw.PreferencesPage(title="Syncing", name="syncing",
-                                   icon_name="folder-remote-symbolic")
+        self.set_title("App settings")
+        self.set_search_enabled(False)
+        page = Adw.PreferencesPage()
 
-        # Untitled: the row inside is already called "Sync mode", and a group
-        # heading repeating its only row's title is noise.
-        group = Adw.PreferencesGroup(
-            description="What a sync does with files that are on the server but "
-                        "not in your local folder.",
+        running = Adw.PreferencesGroup(
+            title="Running unattended",
+            description="Each server's own triggers decide when it syncs; this "
+                        "is what allows any of them to run while NASync is "
+                        "closed.",
         )
-        group.add(SyncModeRow(config, on_changed=self._changed))
-        page.add(group)
-
-        # The setting reads as symmetric but isn't, so say so here rather than
-        # letting someone discover it by restoring and finding nothing removed.
-        note_group = Adw.PreferencesGroup(title="Restore")
-        note = Adw.ActionRow(
-            title="Restore never deletes local files",
-            subtitle="Restoring from the server adds and overwrites local files "
-                     "only. Local files the server doesn't have are left alone, "
-                     "in either mode.",
-        )
-        note.set_subtitle_lines(0)
-        note.set_activatable(False)
-        note.add_prefix(Gtk.Image(icon_name="dialog-information-symbolic"))
-        note_group.add(note)
-        page.add(note_group)
+        running.add(self._rows.background)
+        page.add(running)
+        page.add(self._build_notifications_group())
         page.add(self._build_security_group())
         self.add(page)
 
-        automatic = Adw.PreferencesPage(title="Automatic", name="automatic",
-                                        icon_name="preferences-system-time-symbolic")
-        automatic.add(self._build_automation_group())
-        automatic.add(self._build_notifications_group())
-        self.add(automatic)
+    def _build_notifications_group(self) -> Adw.PreferencesGroup:
+        """A background sync is only trustworthy if it says what it did."""
+        group = Adw.PreferencesGroup(title="Notifications")
+        group.add(self._rows.notifications)
+
+        # A switch that's on while nothing can ever appear is a lie; say so
+        # rather than letting someone conclude syncing itself is broken.
+        if not notify.available():
+            warning = Adw.ActionRow(
+                title="This machine can't show notifications",
+                subtitle="Neither gdbus nor notify-send was found, so nothing "
+                         "will appear no matter how this is set.",
+            )
+            warning.set_subtitle_lines(0)
+            warning.set_activatable(False)
+            warning.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+            group.add(warning)
+        return group
 
     #: What each key source means, in the second person. Deliberately says
     #: where the key *is*, because that is what tells someone whether losing
@@ -561,39 +596,17 @@ class SettingsDialog(Adw.PreferencesDialog):
         self._config.reset_credentials()
         self._changed("credentials")
 
-    def _build_notifications_group(self) -> Adw.PreferencesGroup:
-        """A background sync is only trustworthy if it says what it did."""
-        group = Adw.PreferencesGroup(title="Notifications")
-
-        group.add(self._rows.notifications)
-
-        # A switch that's on while nothing can ever appear is a lie; say so
-        # rather than letting someone conclude syncing itself is broken.
-        if not notify.available():
-            warning = Adw.ActionRow(
-                title="This machine can't show notifications",
-                subtitle="Neither gdbus nor notify-send was found, so nothing "
-                         "will appear no matter how this is set.",
-            )
-            warning.set_subtitle_lines(0)
-            warning.set_activatable(False)
-            warning.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
-            group.add(warning)
-        return group
-
-    def _build_automation_group(self) -> Adw.PreferencesGroup:
-        group = Adw.PreferencesGroup(
-            title="Automatic syncing",
-            description="Off until you turn them on. Both sync using the mode "
-                        "set on the Syncing page.",
-        )
-        for row in self._rows.rows:
-            group.add(row)
-        return group
+    def reload(self) -> None:
+        """Re-read the globals; the per-server tabs write the same config."""
+        self._rows.reload()
 
     def _changed(self, what: str) -> None:
         if self._on_changed:
             self._on_changed(what)
+
+
+#: The old name, kept so nothing that imports it breaks mid-refactor.
+SettingsDialog = AppSettingsDialog
 
 
 class ServerDialog(Adw.Dialog):

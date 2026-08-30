@@ -14,8 +14,13 @@ from nasync.core.config import Config
 
 @pytest.fixture
 def isolated(monkeypatch, tmp_path):
-    """A config and a systemd unit directory that are ours alone."""
+    """A config and a systemd unit directory that are ours alone.
+
+    Carries a server, because since 0.18.0 the automatic-sync triggers live on
+    one — the service exists to run them, so there is nothing to test without.
+    """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    Config().add_or_update_server("home", "10.0.0.5", "u", "pw", "backup", 445)
     return tmp_path
 
 

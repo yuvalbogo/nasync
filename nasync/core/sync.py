@@ -14,8 +14,15 @@ class Syncer:
     """
 
     def __init__(self, reporter=None, progress=None, byte_progress=None,
-                 cancel_event=None, pair_progress=None, config=None):
+                 cancel_event=None, pair_progress=None, config=None,
+                 server: str = None):
         self.config = config or Config()
+        #: Which server this syncer targets; None means the active one. Named
+        #: rather than implied, because the mode, the connection and the pairs
+        #: must all come from the *same* server — since 0.18.0 the mode is a
+        #: per-server setting, so reading it globally could push one server's
+        #: files under another server's rule about deleting.
+        self.server = server
         self._report = reporter or print
         self._progress = progress
         # Optional per-byte progress and a threading.Event for cancellation;
@@ -30,12 +37,12 @@ class Syncer:
 
     def _prepare(self, pair_name):
         """Validate config and return (client, pairs) ready to transfer."""
-        server_config = self.config.get_server_config()
+        server_config = self.config.get_server_config(self.server)
         # Password may legitimately be blank (guest shares); the rest is required.
         if not all(server_config.get(k) for k in ("ip", "username", "share")):
             raise Exception("Server not configured. Run 'nasync setup' first.")
 
-        pairs = self.config.get_pairs()
+        pairs = self.config.get_pairs(self.server)
         if not pairs:
             raise Exception("No sync pairs configured. Run 'nasync add' first.")
 
@@ -60,9 +67,9 @@ class Syncer:
 
     def sync_pair(self, pair_name: str = None, dry_run: bool = False,
                   mirror: bool = None) -> dict:
-        """Push local → server. ``mirror=None`` uses the configured sync mode."""
+        """Push local → server. ``mirror=None`` uses this server's sync mode."""
         if mirror is None:
-            mirror = self.config.get_sync_mode() == "mirror"
+            mirror = self.config.get_sync_mode(self.server) == "mirror"
         return self._run(pair_name, direction="push", dry_run=dry_run, mirror=mirror)
 
     def restore_pair(self, pair_name: str = None, dry_run: bool = False) -> dict:

@@ -180,6 +180,7 @@ class App(Adw.Application):
         super().__init__(application_id="io.github.YuvalBogo.NASync.Shots")
         self.steps = [
             self.shot_main,
+            self.shot_server_settings,
             self.shot_settings,
             self.shot_server,
             self.shot_storage,
@@ -192,7 +193,7 @@ class App(Adw.Application):
         # A little wider than the app's own default so paths don't ellipsize in
         # a README image, but the same height, because the point of these
         # pictures is what the window actually shows without scrolling.
-        self.win.set_default_size(900, 860)
+        self.win.set_default_size(900, 780)
         self.win.present()
         # One idle pass isn't enough: the window still has to allocate and the
         # first frame has to be drawn before the widget tree has any content.
@@ -210,10 +211,18 @@ class App(Adw.Application):
     def shot_main(self):
         capture(self.win, OUT + "/gui-main.png")
 
+    def shot_server_settings(self):
+        """The per-server Settings tab — its own mode and triggers."""
+        for stack in self.win._sub_stacks.values():
+            stack.set_visible_child_name("settings")
+
     def shot_settings(self):
         from nasync.core.config import Config
-        from nasync.gui.dialogs import SettingsDialog
-        self.dialog = SettingsDialog(Config())
+        from nasync.gui.dialogs import AppSettingsDialog
+        capture(self.win, OUT + "/gui-server-settings.png")
+        for stack in self.win._sub_stacks.values():
+            stack.set_visible_child_name("server")
+        self.dialog = AppSettingsDialog(Config())
         self.dialog.present(self.win)
 
     def shot_server(self):

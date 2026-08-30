@@ -9,6 +9,18 @@ def _cfg(tmp):
     return Config()
 
 
+def _cfg_with_server(tmp, name="home"):
+    """A config with one server, which is where sync settings now live.
+
+    Since 0.18.0 the mode and the automatic-sync triggers belong to a server
+    rather than to the app, so a config with no servers has nowhere to keep
+    them — and says so rather than accepting the write.
+    """
+    c = _cfg(tmp)
+    c.add_or_update_server(name, "10.0.0.5", "user", "secret", "backup", 445)
+    return c
+
+
 def test_server_crud():
     with tempfile.TemporaryDirectory() as tmp:
         c = _cfg(tmp)
@@ -194,7 +206,7 @@ def test_pairs_added_before_any_server_are_kept_until_one_exists():
 
 def test_sync_mode():
     with tempfile.TemporaryDirectory() as tmp:
-        c = _cfg(tmp)
+        c = _cfg_with_server(tmp)
         # Mirror is what pushes did before the mode existed, so an upgraded
         # install must keep behaving that way until told otherwise.
         assert c.get_sync_mode() == "mirror"
@@ -211,14 +223,77 @@ def test_sync_mode():
 
         # A hand-edited or corrupted value falls back rather than syncing in an
         # undefined mode.
-        c.data["sync_mode"] = "nonsense"
+        c._server_entry("home")["sync_mode"] = "nonsense"
         assert c.get_sync_mode() == "mirror"
         print("✅ test_sync_mode passed")
 
 
-def test_automation_defaults_to_off():
+def test_sync_mode_is_per_server():
+    """A home NAS you mirror and a work NAS you only add to are not the same
+    setting, and one must never be pushed under the other's rule."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg_with_server(tmp, "home")
+        c.add_or_update_server("work", "10.0.0.9", "u2", "pw2", "share2", 445)
+
+        c.set_sync_mode("mirror", server="home")
+        c.set_sync_mode("update", server="work")
+
+        assert c.get_sync_mode("home") == "mirror"
+        assert c.get_sync_mode("work") == "update"
+
+        # No server named means the active one, as everywhere else.
+        c.set_active_server("work")
+        assert c.get_sync_mode() == "update"
+        c.set_active_server("home")
+        assert c.get_sync_mode() == "mirror"
+
+        assert Config().get_sync_mode("work") == "update"    # survives a reload
+        print("✅ test_sync_mode_is_per_server passed")
+
+
+def test_settings_survive_editing_and_renaming_a_server():
+    """`add_or_update_server` rebuilds the entry from its arguments, so without
+    care an edit would silently switch a server's automation off."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg_with_server(tmp)
+        c.set_sync_mode("update")
+        c.set_automation(live_sync=True, scheduled_sync=True,
+                         scheduled_time="03:30")
+
+        # Editing an unrelated field — the port — keeps the settings.
+        c.add_or_update_server("home", "10.0.0.5", "user", "secret", "backup", 4450)
+        assert c.get_sync_mode() == "update"
+        assert c.get_automation()["live_sync"] is True
+        assert c.get_automation()["scheduled_time"] == "03:30"
+
+        # So does a rename, which is remove-then-add underneath.
+        c.save_server("attic", "10.0.0.5", "user", "secret", "backup", 4450,
+                      orig_name="home")
+        assert c.get_sync_mode("attic") == "update"
+        a = c.get_automation("attic")
+        assert a["live_sync"] is True and a["scheduled_time"] == "03:30"
+        assert Config().get_sync_mode("attic") == "update"
+        print("✅ test_settings_survive_editing_and_renaming_a_server passed")
+
+
+def test_per_server_settings_need_a_server():
+    """With no server there is nowhere to put these, and reporting success for
+    a write that went nowhere is worse than refusing it."""
     with tempfile.TemporaryDirectory() as tmp:
         c = _cfg(tmp)
+        for call in (lambda: c.set_sync_mode("update"),
+                     lambda: c.set_automation(live_sync=True)):
+            try:
+                call()
+                raise AssertionError("expected a refusal with no server")
+            except ValueError as exc:
+                assert "nasync setup" in str(exc), exc
+        print("✅ test_per_server_settings_need_a_server passed")
+
+
+def test_automation_defaults_to_off():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg_with_server(tmp)
         a = c.get_automation()
         # Automatic syncing can delete on the server; nobody gets opted in.
         assert a["live_sync"] is False
@@ -232,9 +307,46 @@ def test_automation_defaults_to_off():
         print("✅ test_automation_defaults_to_off passed")
 
 
+def test_automation_is_per_server_and_wanted_asks_about_any():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg_with_server(tmp, "home")
+        c.add_or_update_server("work", "10.0.0.9", "u2", "pw2", "share2", 445)
+
+        c.set_automation(live_sync=True, server="home")
+        assert c.get_automation("home")["live_sync"] is True
+        assert c.get_automation("work")["live_sync"] is False
+
+        # Per server, and app-wide when asked without one — which is what
+        # decides whether the background service is needed at all.
+        assert c.automation_wanted("home") is True
+        assert c.automation_wanted("work") is False
+        assert c.automation_wanted() is True
+        assert c.automated_servers() == ["home"]
+
+        c.set_automation(scheduled_sync=True, scheduled_time="04:00",
+                         server="work")
+        assert sorted(c.automated_servers()) == ["home", "work"]
+        # Each keeps its own time.
+        assert c.get_automation("home")["scheduled_time"] == "02:00"
+        assert c.get_automation("work")["scheduled_time"] == "04:00"
+        print("✅ test_automation_is_per_server_and_wanted_asks_about_any passed")
+
+
+def test_scheduled_run_dates_are_tracked_per_server():
+    """One NAS being unreachable must not mark another's day as done."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg_with_server(tmp, "home")
+        c.add_or_update_server("work", "10.0.0.9", "u2", "pw2", "share2", 445)
+
+        c.record_scheduled_run("2026-08-30", server="home")
+        assert c.get_automation("home")["last_scheduled_run"] == "2026-08-30"
+        assert c.get_automation("work")["last_scheduled_run"] is None
+        print("✅ test_scheduled_run_dates_are_tracked_per_server passed")
+
+
 def test_background_gates_the_service_without_clearing_triggers():
     with tempfile.TemporaryDirectory() as tmp:
-        c = _cfg(tmp)
+        c = _cfg_with_server(tmp)
         # On by default, so turning a trigger on just works.
         assert c.get_automation()["background"] is True
         c.set_automation(live_sync=True)
@@ -247,9 +359,24 @@ def test_background_gates_the_service_without_clearing_triggers():
         print("✅ test_background_gates_the_service_without_clearing_triggers passed")
 
 
+def test_background_stays_global_across_servers():
+    """There is one systemd unit, so pausing unattended syncing is one fact
+    about the machine, not a per-server choice."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg_with_server(tmp, "home")
+        c.add_or_update_server("work", "10.0.0.9", "u2", "pw2", "share2", 445)
+
+        c.set_automation(background=False, server="home")
+        assert c.get_automation("work")["background"] is False
+        assert c.get_background() is False
+        # It is not written onto the server it was set through.
+        assert "background" not in c._server_entry("home")
+        print("✅ test_background_stays_global_across_servers passed")
+
+
 def test_scheduled_time_is_validated_and_normalized():
     with tempfile.TemporaryDirectory() as tmp:
-        c = _cfg(tmp)
+        c = _cfg_with_server(tmp)
         assert c.set_automation(scheduled_time="7:5")["scheduled_time"] == "07:05"
 
         for bad in ("25:00", "02:61", "2pm", "0200", ""):
@@ -261,7 +388,7 @@ def test_scheduled_time_is_validated_and_normalized():
         assert c.get_automation()["scheduled_time"] == "07:05"
 
         # A hand-edited value falls back rather than crashing the daemon.
-        c.data["automation"]["scheduled_time"] = "nonsense"
+        c._server_entry("home")["scheduled_time"] = "nonsense"
         assert c.get_automation()["scheduled_time"] == "02:00"
         print("✅ test_scheduled_time_is_validated_and_normalized passed")
 
@@ -278,7 +405,12 @@ def test_legacy_automation_keys_migrate_to_live_sync():
             os.environ["XDG_CONFIG_HOME"] = tmp
             cfgdir = os.path.join(tmp, "nasync")
             os.makedirs(cfgdir)
-            json.dump({"automation": dict(legacy)},
+            # A config this old is the single-server format, so it has a server
+            # for the migrated settings to land on — which is the point: they
+            # always described whichever server was in use.
+            json.dump({"automation": dict(legacy),
+                       "server": {"ip": "10.0.0.5", "username": "u",
+                                  "share": "backup", "port": 445}},
                       open(os.path.join(cfgdir, "config.json"), "w"))
 
             a = Config().get_automation()
@@ -288,11 +420,97 @@ def test_legacy_automation_keys_migrate_to_live_sync():
     print("✅ test_legacy_automation_keys_migrate_to_live_sync passed")
 
 
+def _write_config(tmp, data):
+    os.environ["XDG_CONFIG_HOME"] = tmp
+    cfgdir = os.path.join(tmp, "nasync")
+    os.makedirs(cfgdir, exist_ok=True)
+    json.dump(data, open(os.path.join(cfgdir, "config.json"), "w"))
+
+
+#: A pre-0.18.0 config: one app-wide mode and one app-wide schedule, two
+#: servers, and only the active one ever actually automated by them.
+_PRE_0_18 = {
+    "servers": [
+        {"name": "home", "ip": "10.0.0.5", "username": "u", "share": "backup",
+         "port": 445},
+        {"name": "work", "ip": "10.0.0.9", "username": "u2", "share": "share2",
+         "port": 445},
+    ],
+    "active_server": "home",
+    "sync_mode": "update",
+    "automation": {"live_sync": True, "scheduled_sync": True,
+                   "scheduled_time": "03:30", "last_scheduled_run": "2026-08-01",
+                   "background": False, "interval_minutes": 7},
+}
+
+
+def test_migration_gives_the_old_settings_to_the_active_server_only():
+    """Nothing that wasn't syncing by itself before the upgrade starts doing so
+    because of it — inheriting a trigger would begin unattended mirror syncs on
+    a NAS nobody asked to automate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_config(tmp, dict(_PRE_0_18))
+        c = Config()
+
+        home = c.get_automation("home")
+        assert c.get_sync_mode("home") == "update"
+        assert home["live_sync"] is True and home["scheduled_sync"] is True
+        assert home["scheduled_time"] == "03:30"
+        assert home["last_scheduled_run"] == "2026-08-01"
+        assert home["interval_minutes"] == 7
+
+        work = c.get_automation("work")
+        assert work["live_sync"] is False and work["scheduled_sync"] is False
+        assert work["scheduled_time"] == "02:00"        # the default, not 03:30
+        assert c.get_sync_mode("work") == "mirror"      # the default, not update
+        assert c.automated_servers() == ["home"]
+
+        # `background` is app-wide and stays where it was.
+        assert c.get_background() is False
+        assert home["background"] is False and work["background"] is False
+
+        # One source of truth afterwards: the global copies are gone.
+        assert "sync_mode" not in c.data
+        assert "live_sync" not in c.data.get("automation", {})
+        print("✅ test_migration_gives_the_old_settings_to_the_active_server_only passed")
+
+
+def test_migration_is_idempotent_and_does_not_undo_later_changes():
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_config(tmp, dict(_PRE_0_18))
+        Config()                                     # migrates
+
+        changed = Config()
+        changed.set_sync_mode("mirror", server="home")
+        changed.set_automation(live_sync=False, server="home")
+
+        again = Config()                             # a later run must not revert
+        assert again.get_sync_mode("home") == "mirror"
+        assert again.get_automation("home")["live_sync"] is False
+        print("✅ test_migration_is_idempotent_and_does_not_undo_later_changes passed")
+
+
+def test_migration_with_no_servers_drops_the_orphaned_block():
+    """With nothing to describe, the old block is not kept as a second source
+    of truth that a later-added server would silently inherit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_config(tmp, {"sync_mode": "update",
+                            "automation": {"live_sync": True}})
+        c = Config()
+        assert "sync_mode" not in c.data
+        assert "live_sync" not in c.data.get("automation", {})
+
+        c.add_or_update_server("new", "10.0.0.1", "u", "p", "s", 445)
+        assert c.get_sync_mode("new") == "mirror"
+        assert c.get_automation("new")["live_sync"] is False
+        print("✅ test_migration_with_no_servers_drops_the_orphaned_block passed")
+
+
 def test_record_scheduled_run_does_not_clobber_concurrent_edits():
     """The daemon writes the run date while the desktop app may be writing
     settings; a stale in-memory copy would silently undo them."""
     with tempfile.TemporaryDirectory() as tmp:
-        daemon = _cfg(tmp)
+        daemon = _cfg_with_server(tmp)
         daemon.get_automation()                      # daemon's view is now stale
 
         app = Config()                               # the GUI, another process

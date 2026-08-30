@@ -19,9 +19,9 @@ from nasync.core.config import Config  # noqa: E402
 from nasync.core.samba import SAMBAClient  # noqa: E402
 from nasync.core.sync import Syncer  # noqa: E402
 from nasync.format import format_bytes  # noqa: E402
-from nasync.gui.dialogs import (AutomationRows, PairDialog,  # noqa: E402
-                                ServerDialog, ServerInfoDialog,  # noqa: E402
-                                SettingsDialog, StorageDialog,  # noqa: E402
+from nasync.gui.dialogs import (AppSettingsDialog, AutomationRows,  # noqa: E402
+                                PairDialog, ServerDialog,  # noqa: E402
+                                ServerInfoDialog, StorageDialog,  # noqa: E402
                                 SyncModeRow)
 from nasync.gui.threads import on_main, run_async  # noqa: E402
 from nasync.system.notify import Notifier  # noqa: E402
@@ -82,10 +82,10 @@ class NasyncWindow(Adw.ApplicationWindow):
 
     def __init__(self, application):
         super().__init__(application=application, title="NASync")
-        # Tall enough that a typical setup — a server, a handful of pairs, and
-        # the settings group — is all on screen at once, which is the whole
-        # point of putting the settings on the page.
-        self.set_default_size(720, 860)
+        # Sized for the Server tab — a server and a handful of pairs — with the
+        # action bar pinned under it. The settings live on their own tab now,
+        # so the window no longer has to be tall enough for both at once.
+        self.set_default_size(720, 780)
 
         self.config = Config()
         self._cancel_event = None
@@ -105,7 +105,7 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._toasts = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
 
-        header = Adw.HeaderBar()
+        header = self._header = Adw.HeaderBar()
         self._window_title = Adw.WindowTitle(title="NASync",
                                              subtitle="Sync your NAS with CLASS")
         header.set_title_widget(self._window_title)
@@ -121,21 +121,30 @@ class NasyncWindow(Adw.ApplicationWindow):
         header.pack_end(menu_button)
         toolbar.add_top_bar(header)
 
-        # One page per server, switched by tabs. Each page owns its server's
-        # pairs, so a tab is the whole context for a sync. The tabs sit in
-        # their own bar rather than the header, which keeps the app's title
-        # and tagline where they belong.
+        # Two levels, outer first: which server, then which aspect of it.
+        # Servers are the outer scope — a tab is the whole context for a sync —
+        # so they sit in the header, and the Server/Settings switcher for
+        # whichever is selected sits in the bar beneath.
         self._stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=self._stack,
-                                    policy=Adw.ViewSwitcherPolicy.WIDE)
-        switcher.set_halign(Gtk.Align.CENTER)
+        self._server_switcher = Adw.ViewSwitcher(
+            stack=self._stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+
+        self._sub_switcher = Adw.ViewSwitcher(
+            policy=Adw.ViewSwitcherPolicy.WIDE)
+        self._sub_switcher.set_halign(Gtk.Align.CENTER)
         self._switcher_bar = Gtk.Box()
         self._switcher_bar.set_halign(Gtk.Align.CENTER)
         self._switcher_bar.set_margin_top(6)
         self._switcher_bar.set_margin_bottom(6)
-        self._switcher_bar.append(switcher)
+        self._switcher_bar.append(self._sub_switcher)
         self._switcher_bar.set_visible(False)
         toolbar.add_top_bar(self._switcher_bar)
+
+        #: The Server/Settings stack belonging to each server page, and which
+        #: of the two the user last chose. Remembered so that switching servers
+        #: keeps you on the tab you were reading rather than snapping back.
+        self._sub_stacks = {}
+        self._sub_page = "server"
 
         self._stack.connect("notify::visible-child-name", self._on_tab_switched)
         toolbar.set_content(self._stack)
@@ -162,27 +171,40 @@ class NasyncWindow(Adw.ApplicationWindow):
         model.append("Storage…", "win.storage")
 
         section = Gio.Menu()
-        section.append("Settings", "win.settings")
+        section.append("App settings…", "win.settings")
         section.append("Documentation", "win.readme")
         section.append("About NASync", "app.about")
         model.append_section(None, section)
 
         button.set_menu_model(model)
 
-    def _build_server_page(self, server: dict) -> Adw.PreferencesPage:
-        """One server, read top to bottom: who, what, then how.
+    def _build_server_page(self, server: dict) -> Gtk.Widget:
+        """One server as two tabs: what it syncs, and how it syncs.
 
-        Server (which NAS) → sync pairs (which folders) → how syncing works
-        (what a run does, and whether one happens by itself). The last of those
-        is on the page rather than behind the menu because this is an app you
-        configure once and then leave alone: a setting you can't see is one you
-        can't confirm, and the mode that deletes on the server is the last one
-        that should need going to look for.
+        Splitting them keeps the screen you land on about the job — this NAS
+        and these folders — while the settings stay one click away rather than
+        behind a menu. They are per server, so they belong inside the server's
+        own context rather than in an app-wide dialog.
         """
+        name = server["name"]
+        stack = Adw.ViewStack()
+
+        page = stack.add_titled(self._build_server_tab(server), "server", "Server")
+        page.set_icon_name("network-server-symbolic")
+        page = stack.add_titled(self._build_settings_tab(name), "settings",
+                                "Settings")
+        page.set_icon_name("emblem-system-symbolic")
+
+        stack.set_visible_child_name(self._sub_page)
+        stack.connect("notify::visible-child-name", self._on_sub_tab_switched)
+        self._sub_stacks[name] = stack
+        return stack
+
+    def _build_server_tab(self, server: dict) -> Adw.PreferencesPage:
+        """Which NAS, and which folders go to it."""
         name = server["name"]
         page = Adw.PreferencesPage()
 
-        # ──── SERVER ────
         details = Adw.PreferencesGroup(title="Server")
         row = Adw.ActionRow(
             title=name,
@@ -199,9 +221,6 @@ class NasyncWindow(Adw.ApplicationWindow):
         details.add(row)
         page.add(details)
 
-        # ──── SYNC PAIRS ────
-        # No group description: every row already shows "local → destination",
-        # and the line cost enough height to push the settings below the fold.
         pairs_group = Adw.PreferencesGroup(title="Sync pairs")
         # Beside the group's own title, which is where GNOME puts the action
         # that adds to a list — not as a row inside the list it adds to.
@@ -210,9 +229,6 @@ class NasyncWindow(Adw.ApplicationWindow):
         pairs_group.set_header_suffix(add_pair)
         self._fill_pairs_group(pairs_group, name)
         page.add(pairs_group)
-
-        # ──── HOW SYNCING WORKS ────
-        page.add(self._build_syncing_group())
 
         self._pair_groups[name] = pairs_group
         return page
@@ -254,38 +270,60 @@ class NasyncWindow(Adw.ApplicationWindow):
 
         group._rows = rows
 
-    def _build_syncing_group(self) -> Adw.PreferencesGroup:
-        """Mode, automation and notifications, stated rather than hidden.
+    def _build_settings_tab(self, name: str) -> Adw.PreferencesPage:
+        """This server's own mode and triggers.
 
-        These are app-wide, not per-server — `get_sync_mode`, `get_automation`
-        and `get_notifications` take no server — so the description says so.
-        Without it a group sitting on a per-server tab reads as if this NAS
-        could be on Mirror while the other is on Update.
+        Everything here belongs to `name` alone: since 0.18.0 a home NAS can
+        mirror on a schedule while a work one only ever takes a manual push.
+        The genuinely app-wide settings — the background service, notifications
+        and password security — are in the menu's App settings instead.
         """
-        group = Adw.PreferencesGroup(
-            title="How syncing works",
-            description="These apply to every server.",
+        page = Adw.PreferencesPage()
+
+        mode_group = Adw.PreferencesGroup(
+            title="Sync mode",
+            description=f"What a sync does with files that are on '{name}' but "
+                        "not in your local folder.",
         )
+        mode_row = SyncModeRow(self.config, server=name,
+                               on_changed=self._on_settings_changed)
+        mode_group.add(mode_row)
+        page.add(mode_group)
 
-        mode_row = SyncModeRow(self.config, on_changed=self._on_settings_changed)
-        group.add(mode_row)
-
-        # Collapsed it reports the state; expanded it is the whole automation
-        # panel. Same row objects as the Settings dialog, so neither can drift.
-        expander = Adw.ExpanderRow(title="Automatic syncing")
-        expander.add_prefix(Gtk.Image(icon_name="preferences-system-time-symbolic"))
-        automation = AutomationRows(self.config,
-                                    on_changed=self._on_settings_changed,
-                                    on_summary=expander.set_subtitle)
+        auto_group = Adw.PreferencesGroup(
+            title="Automatic syncing",
+            description=f"Off until you turn them on. Both sync '{name}' using "
+                        "the mode above.",
+        )
+        automation = AutomationRows(self.config, server=name,
+                                    on_changed=self._on_settings_changed)
         for row in automation.rows:
-            expander.add_row(row)
-        group.add(expander)
-        group.add(automation.notifications)
+            auto_group.add(row)
+        page.add(auto_group)
 
-        # One set per server page, but the settings behind them are app-wide,
-        # so a change on any surface has to reach all of them.
+        note_group = Adw.PreferencesGroup(title="Restore")
+        note = Adw.ActionRow(
+            title="Restore never deletes local files",
+            subtitle="Restoring from the server adds and overwrites local files "
+                     "only. Local files the server doesn't have are left alone, "
+                     "in either mode.",
+        )
+        note.set_subtitle_lines(0)
+        note.set_activatable(False)
+        note.add_prefix(Gtk.Image(icon_name="dialog-information-symbolic"))
+        note_group.add(note)
+        page.add(note_group)
+
+        # Per server page, and the settings behind them are per server too, so
+        # each set reloads only its own.
         self._syncing_rows.append((mode_row, automation))
-        return group
+        return page
+
+    def _on_sub_tab_switched(self, stack, _param) -> None:
+        """Remember Server/Settings so switching NAS doesn't snap you back."""
+        name = stack.get_visible_child_name()
+        if name and not self._rebuilding:
+            self._sub_page = name
 
     def _build_empty_page(self) -> Adw.StatusPage:
         page = Adw.StatusPage(
@@ -441,11 +479,13 @@ class NasyncWindow(Adw.ApplicationWindow):
             child = following
         self._pair_groups = {}
         self._syncing_rows = []
+        self._sub_stacks = {}
 
         servers = self.config.list_servers()
         if not servers:
             self._stack.add_titled(self._build_empty_page(), "none", "No servers")
             self._switcher_bar.set_visible(False)
+            self._header.set_title_widget(self._window_title)
             self._set_actions_sensitive(False)
             return
 
@@ -460,10 +500,27 @@ class NasyncWindow(Adw.ApplicationWindow):
 
         active = self.config.get_active_server_name() or servers[0]["name"]
         self._stack.set_visible_child_name(active)
-        # With one server the tab is just a label for the only thing on screen,
-        # and the page already names it.
-        self._switcher_bar.set_visible(len(servers) > 1)
+        # With one server there is nothing to switch between, so the header
+        # goes back to naming the app rather than showing a switcher of one.
+        self._header.set_title_widget(
+            self._server_switcher if len(servers) > 1 else self._window_title)
+        self._switcher_bar.set_visible(True)
+        self._bind_sub_switcher(active)
         self._set_actions_sensitive(True)
+
+    def _bind_sub_switcher(self, server_name: str) -> None:
+        """Point the Server/Settings switcher at the visible server's stack.
+
+        One switcher rather than one per page: it lives in a bar of its own, so
+        it has to be re-aimed whenever the server changes — and re-aimed at the
+        tab the user was already on.
+        """
+        stack = self._sub_stacks.get(server_name)
+        if stack is None:
+            return
+        if stack.get_visible_child_name() != self._sub_page:
+            stack.set_visible_child_name(self._sub_page)
+        self._sub_switcher.set_stack(stack)
 
     def refresh_pairs(self, server_name: str = None) -> None:
         """Refresh pairs display after changes (add/remove/edit)."""
@@ -527,8 +584,9 @@ class NasyncWindow(Adw.ApplicationWindow):
     # Settings
     # ------------------------------------------------------------------ #
     def open_settings(self) -> None:
-        SettingsDialog(self.config,
-                       on_changed=self._on_settings_changed).present(self)
+        """The app-wide settings. Per-server ones are on each server's tab."""
+        AppSettingsDialog(self.config,
+                          on_changed=self._on_settings_changed).present(self)
 
     def open_server_info(self) -> None:
         """What the active server is, and what was negotiated with it."""
@@ -599,6 +657,9 @@ class NasyncWindow(Adw.ApplicationWindow):
         name = stack.get_visible_child_name()
         if self._rebuilding or not name or name == "none":
             return
+        # Re-aim the Server/Settings switcher even when the active server is
+        # unchanged: the stack it points at belongs to the visible page.
+        self._bind_sub_switcher(name)
         if self.config.get_active_server_name() == name:
             return
         if self.config.set_active_server(name):

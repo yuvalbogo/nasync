@@ -7,11 +7,13 @@ than through a running observer.
 
 import datetime
 import os
+import threading
 import time
 import tempfile
 
 from nasync.system import lan
-from nasync.core.automation import Automator, scheduled_run_is_due
+from nasync.core.automation import (AutomationRunner, Automator, run_all,
+                                    scheduled_run_is_due)
 from nasync.core.config import Config
 
 
@@ -335,11 +337,15 @@ def test_the_notifications_switch_reaches_a_running_service(monkeypatch, recordi
 
         automator = Automator(reporter=lambda _m: None, config=config,
                               notifier=recording_notifier)
-        automator._settings_changed()          # prime the mtime
+        # Watching the file is the loop's job, so it is the runner that carries
+        # a change through to every server's notifier.
+        runner = AutomationRunner([automator], config=config,
+                                  reporter=lambda _m: None)
+        runner._settings_changed()             # prime the mtime
 
         # Another process — the desktop app — turns notifications off.
         Config().set_notifications(False)
-        assert automator._settings_changed() is True
+        assert runner._settings_changed() is True
         assert recording_notifier.enabled is False
 
         automator.sync_now("file changed")
@@ -496,3 +502,204 @@ if __name__ == "__main__":
     test_scheduled_run_happens_once_a_day()
     test_a_missed_run_catches_up_rather_than_being_skipped()
     test_running_with_everything_off_is_an_error()
+
+
+# --------------------------------------------------------------------------- #
+# Per-server automation (0.18.0)
+# --------------------------------------------------------------------------- #
+def _two_servers(tmp):
+    """Two servers, each with its own folder, mode and triggers."""
+    os.environ["XDG_CONFIG_HOME"] = tmp
+    config = Config()
+    for name, ip in (("home", "192.168.1.50"), ("work", "10.9.9.9")):
+        folder = os.path.join(tmp, name)
+        os.makedirs(folder, exist_ok=True)
+        config.add_or_update_server(name, ip, "u", "p", f"{name}-share", 445)
+        config.add_pair(folder, f"/{name}", f"{name}-pair", server=name)
+    config.set_active_server("home")
+    return config
+
+
+def _recording_syncer(monkeypatch, result=None):
+    """Capture which server each Syncer was built for, in order."""
+    import nasync.core.automation as automation_module
+    seen = []
+
+    class _FakeSyncer:
+        def __init__(self, *a, **k):
+            self._server = k.get("server")
+
+        def sync_pair(self, pair_name=None):
+            seen.append(self._server)
+            return result or {"ok": 1, "failed": 0, "transferred": 1,
+                              "skipped": 0, "deleted": 0, "errors": 0}
+
+    monkeypatch.setattr(automation_module, "Syncer", _FakeSyncer)
+    return seen
+
+
+def test_each_server_syncs_under_its_own_mode(monkeypatch):
+    """The whole point: one NAS mirroring while another only ever adds."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        config.set_sync_mode("mirror", server="home")
+        config.set_sync_mode("update", server="work")
+
+        from nasync.core.sync import Syncer
+        assert Syncer(config=config, server="home").config.get_sync_mode("home") == "mirror"
+        assert Syncer(config=config, server="work").config.get_sync_mode("work") == "update"
+
+        # And the automator hands its own server to the syncer it builds.
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        seen = _recording_syncer(monkeypatch)
+        for name in ("home", "work"):
+            Automator(reporter=lambda _m: None, config=config,
+                      server=name).sync_now("test")
+        assert seen == ["home", "work"], seen
+        print("✅ test_each_server_syncs_under_its_own_mode passed")
+
+
+def test_the_network_gate_is_asked_per_server(monkeypatch):
+    """A work NAS is never on the home network, and must not block the home one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        reachable = {"192.168.1.50": True, "10.9.9.9": False}
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: reachable[ip])
+        monkeypatch.setattr(lan, "describe", lambda ip, port=445: "not on that network")
+        seen = _recording_syncer(monkeypatch)
+
+        home = Automator(reporter=lambda _m: None, config=config, server="home")
+        work = Automator(reporter=lambda _m: None, config=config, server="work")
+        assert home.sync_now("test") is True
+        assert work.sync_now("test") is False
+        assert seen == ["home"], seen
+        print("✅ test_the_network_gate_is_asked_per_server passed")
+
+
+def test_scheduled_runs_are_recorded_against_their_own_server(monkeypatch):
+    """One NAS failing must not mark another's day as done."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _recording_syncer(monkeypatch)
+
+        home = Automator(reporter=lambda _m: None, config=config, server="home")
+        settings = config.get_automation("home")
+        settings["scheduled_time"] = "00:01"
+        home.run_scheduled(settings)
+
+        today = datetime.date.today().isoformat()
+        assert config.get_automation("home")["last_scheduled_run"] == today
+        assert config.get_automation("work")["last_scheduled_run"] is None
+        print("✅ test_scheduled_runs_are_recorded_against_their_own_server passed")
+
+
+def test_a_failed_scheduled_run_backs_off_without_marking_the_day_done(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _recording_syncer(monkeypatch, result=_ALL_FAILED)
+
+        home = Automator(reporter=lambda _m: None, config=config, server="home")
+        home.run_scheduled(config.get_automation("home"))
+
+        assert config.get_automation("home")["last_scheduled_run"] is None
+        # Backed off, so the once-a-second loop can't hammer a failing NAS.
+        assert home._scheduled_retry_due() is False
+        print("✅ test_a_failed_scheduled_run_backs_off_without_marking_the_day_done passed")
+
+
+def test_syncs_never_overlap_across_servers(monkeypatch):
+    """Watchers run per server, but the sync itself is serialised — the
+    guarantee this module's docstring makes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _recording_syncer(monkeypatch)
+
+        lock = threading.Lock()
+        home = Automator(reporter=lambda _m: None, config=config,
+                         server="home", sync_lock=lock)
+        work = Automator(reporter=lambda _m: None, config=config,
+                         server="work", sync_lock=lock)
+
+        lock.acquire()                      # stand in for a sync in flight
+        try:
+            assert work.sync_now("test") is False   # skipped, not queued
+        finally:
+            lock.release()
+        assert work.sync_now("test") is True
+        print("✅ test_syncs_never_overlap_across_servers passed")
+
+
+def test_run_all_drives_only_the_automated_servers(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        # Nothing on anywhere: refuse rather than idle in the background.
+        try:
+            run_all(reporter=lambda _m: None, config=config)
+            raise AssertionError("expected a refusal with no triggers on")
+        except Exception as e:
+            assert "Nothing to automate" in str(e), e
+
+        config.set_automation(live_sync=True, server="work")
+        assert config.automated_servers() == ["work"]
+
+        driven = []
+        import nasync.core.automation as automation_module
+        real_runner = automation_module.AutomationRunner
+
+        class _CapturingRunner(real_runner):
+            def run(self, sync_at_start=None):
+                # An automator exists per configured server, so that one being
+                # automated later can be noticed; what matters is which the
+                # loop will actually act on.
+                driven.extend(a.automator.server for a in self._states
+                              if self._runnable(a))
+                return None                 # don't actually loop
+
+        monkeypatch.setattr(automation_module, "AutomationRunner", _CapturingRunner)
+        run_all(reporter=lambda _m: None, config=config)
+        # 'home' has no triggers, so it is not watched or scheduled at all.
+        assert driven == ["work"], driven
+        print("✅ test_run_all_drives_only_the_automated_servers passed")
+
+
+def test_a_server_automated_while_running_is_picked_up(monkeypatch):
+    """The docs promise settings changes reach a running service without a
+    restart. Iterating only the set that was automated at startup broke that
+    for a second NAS — invisible until the process happened to restart."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _two_servers(tmp)
+        config.set_automation(live_sync=True, server="home")
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        seen = _recording_syncer(monkeypatch)
+
+        lock = threading.Lock()
+        automators = [Automator(reporter=lambda _m: None, config=config,
+                                server=name, sync_lock=lock)
+                      for name in ("home", "work")]
+        runner = AutomationRunner(automators, config=config,
+                                  reporter=lambda _m: None)
+        runner.TICK = 0.05
+
+        # 'work' has no triggers at startup, so it starts unwatched.
+        assert config.automated_servers() == ["home"]
+
+        def enable_work_then_stop():
+            time.sleep(0.3)
+            # Another process — the desktop app — automates the second server.
+            Config().set_automation(scheduled_sync=True, scheduled_time="00:01",
+                                    server="work")
+            deadline = time.monotonic() + 5
+            while "work" not in seen and time.monotonic() < deadline:
+                time.sleep(0.05)
+            runner.stop()
+
+        flipper = threading.Thread(target=enable_work_then_stop, daemon=True)
+        flipper.start()
+        runner.run(sync_at_start=False)
+        flipper.join(timeout=5)
+
+        assert "work" in seen, seen
+        print("✅ test_a_server_automated_while_running_is_picked_up passed")

@@ -88,6 +88,14 @@ def test_mode_command_shows_and_sets():
         os.environ["XDG_CONFIG_HOME"] = tmp
         runner = CliRunner()
 
+        # The mode belongs to a server since 0.18.0, so with none configured
+        # the command says so rather than failing somewhere in the config.
+        result = runner.invoke(cli.mode, ["update"])
+        assert result.exit_code != 0
+        assert "nasync setup" in result.output, result.output
+
+        Config().add_or_update_server("home", "10.0.0.5", "u", "pw", "backup", 445)
+
         result = runner.invoke(cli.mode, [], catch_exceptions=False)
         assert "mirror" in result.output, result.output
 

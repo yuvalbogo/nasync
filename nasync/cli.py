@@ -593,37 +593,66 @@ def encryption(state, server_name):
 
 @main.command()
 @click.argument("mode", type=click.Choice(SYNC_MODES), required=False)
-def mode(mode):
-    """Show or set the sync mode used by sync, watch, and auto
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server to set this for (default: the active one)")
+def mode(mode, server):
+    """Show or set a server's sync mode, used by sync, watch, and auto
+
+    Per server since 0.18.0: a NAS you mirror and one you only ever add to are
+    two different rules about deleting, not one.
 
     With no argument, prints the current mode. Restore is unaffected — it never
     deletes local files in either mode.
     """
     config = Config()
+    server = _require_server(config, server)
     if mode:
-        config.set_sync_mode(mode)
-        click.echo(f"✅ Sync mode: {mode} — {_MODE_HELP[mode]}")
+        config.set_sync_mode(mode, server=server)
+        click.echo(f"✅ Sync mode ({server}): {mode} — {_MODE_HELP[mode]}")
         return
-    current = config.get_sync_mode()
-    click.echo(f"Sync mode: {current} — {_MODE_HELP[current]}")
+    current = config.get_sync_mode(server)
+    click.echo(f"Sync mode ({server}): {current} — {_MODE_HELP[current]}")
     other = next(m for m in SYNC_MODES if m != current)
     click.echo(f"  Switch with: nasync mode {other}")
 
 
 def _describe_automation(config) -> list:
-    """The automation settings as lines, shared by `status` and `auto --status`."""
-    a = config.get_automation()
-    lines = [
-        f"  Live sync:      {'on' if a['live_sync'] else 'off'}"
-        f"{'  (syncs seconds after a file changes, on your home network)' if a['live_sync'] else ''}",
-        f"  Scheduled sync: {'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}",
-    ]
-    if a["interval_minutes"] > 0:
-        lines.append(f"  Interval sync:  every {a['interval_minutes']} min")
-    if not a["background"]:
+    """The automation settings as lines, shared by `status` and `auto --status`.
+
+    Per server since 0.18.0, so this lists each one that has a trigger on
+    rather than describing a single app-wide setting. Servers with nothing on
+    are summarised in a line rather than each getting an "off" block, which on
+    a machine with several NASes would be mostly noise.
+    """
+    servers = [s["name"] for s in config.list_servers()]
+    automated = config.automated_servers()
+    lines = []
+
+    if not servers:
+        return ["  (no servers configured)"]
+
+    for name in automated:
+        a = config.get_automation(name)
+        lines.append(f"  {name}  ({config.get_sync_mode(name)} mode)")
+        lines.append(
+            f"    Live sync:      {'on' if a['live_sync'] else 'off'}"
+            f"{'  (syncs seconds after a file changes, on that network)' if a['live_sync'] else ''}")
+        lines.append(
+            f"    Scheduled sync: "
+            f"{'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}")
+        if a["interval_minutes"] > 0:
+            lines.append(f"    Interval sync:  every {a['interval_minutes']} min")
+
+    idle = [n for n in servers if n not in automated]
+    if idle:
+        lines.append(f"  Not automated:  {', '.join(idle)}")
+
+    # Both of these are app-wide, so they are stated once rather than per
+    # server — there is one background service and one notification setting.
+    if not config.get_background():
         lines.append("  Background:     off — nothing runs the triggers above "
                      "until you turn it back on")
-    elif a["live_sync"] or a["scheduled_sync"]:
+    elif automated:
         lines.append(f"  Background:     {service.status()['detail']}")
     lines.append(f"  Notifications:  {_describe_notifications(config)}")
     return lines
@@ -639,6 +668,24 @@ def _describe_notifications(config) -> str:
     return "on — background syncs announce themselves"
 
 
+def _require_server(config, server: str = None) -> str:
+    """Resolve which server a per-server setting applies to, or refuse.
+
+    Since 0.18.0 the sync mode and the automatic triggers live on a server, so
+    every command that writes one has to know which — and say so when there
+    isn't one, rather than failing further down in the config.
+    """
+    name = server or config.get_active_server_name()
+    if not name:
+        raise click.ClickException(
+            "No server configured. Add one with 'nasync setup' first.")
+    if not config.get_server(name, with_password=False):
+        known = ", ".join(s["name"] for s in config.list_servers()) or "none"
+        raise click.ClickException(
+            f"No server named '{name}'. Configured servers: {known}.")
+    return name
+
+
 def _apply_service(config) -> None:
     """Match the background service to the settings, reporting what happened."""
     try:
@@ -651,19 +698,25 @@ def _apply_service(config) -> None:
 
 @main.command(name="live-sync")
 @click.argument("state", type=click.Choice(["on", "off"]), required=False)
-def live_sync(state):
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server to set this for (default: the active one)")
+def live_sync(state, server):
     """Turn live sync on or off (sync moments after a file changes)
 
-    Only syncs while this machine is on the same network as the server, so a
+    Per server since 0.18.0: each NAS has its own triggers, so turning this on
+    for your home server leaves a work server alone.
+
+    Only syncs while this machine is on the same network as that server, so a
     laptop away from home waits and syncs on the way back in.
     """
     config = Config()
+    server = _require_server(config, server)
     if state is None:
-        a = config.get_automation()
-        click.echo(f"Live sync: {'on' if a['live_sync'] else 'off'}")
+        a = config.get_automation(server)
+        click.echo(f"Live sync ({server}): {'on' if a['live_sync'] else 'off'}")
         return
-    config.set_automation(live_sync=(state == "on"))
-    click.echo(f"✅ Live sync: {state}")
+    config.set_automation(live_sync=(state == "on"), server=server)
+    click.echo(f"✅ Live sync ({server}): {state}")
     _apply_service(config)
 
 
@@ -671,29 +724,35 @@ def live_sync(state):
 @click.argument("state", type=click.Choice(["on", "off"]), required=False)
 @click.option("--at", default=None, metavar="HH:MM",
               help="Time of day to sync (default 02:00)")
-def scheduled_sync(state, at):
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server to set this for (default: the active one)")
+def scheduled_sync(state, at, server):
     """Turn the daily scheduled sync on or off, and set its time
+
+    Per server since 0.18.0, times included — a home NAS at 02:00 and a work
+    one at 18:00 are two schedules, not one.
 
     A run missed because the machine was asleep or away from home isn't lost —
     it happens at the first opportunity that day.
     """
     config = Config()
+    server = _require_server(config, server)
     if state is None and at is None:
-        a = config.get_automation()
-        click.echo(f"Scheduled sync: "
+        a = config.get_automation(server)
+        click.echo(f"Scheduled sync ({server}): "
                    f"{'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}")
         return
     try:
         if at is not None:
-            config.set_automation(scheduled_time=at)
+            config.set_automation(scheduled_time=at, server=server)
         if state is not None:
-            config.set_automation(scheduled_sync=(state == "on"))
+            config.set_automation(scheduled_sync=(state == "on"), server=server)
     except ValueError as e:
         click.echo(f"❌ {e}", err=True)
         raise SystemExit(1)
 
-    a = config.get_automation()
-    click.echo(f"✅ Scheduled sync: "
+    a = config.get_automation(server)
+    click.echo(f"✅ Scheduled sync ({server}): "
                f"{'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}")
     _apply_service(config)
 
@@ -792,25 +851,34 @@ def service_cmd(action):
               help="Show automation settings and exit")
 @click.option("--sync-at-start/--no-sync-at-start", "sync_at_start", default=None,
               help="Sync once on startup (default: only when live sync is on)")
-def auto(interval, live, schedule, at, show_status, sync_at_start):
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server the setting flags apply to (default: active)")
+def auto(interval, live, schedule, at, show_status, sync_at_start, server):
     """Run automatic syncing in the foreground (live and/or scheduled)
 
-    This is what the background service runs. Options are remembered, so a
-    later plain `nasync auto` reuses them. Runs until Ctrl+C.
+    This is what the background service runs, and since 0.18.0 it drives
+    **every** server that has a trigger on, each with its own mode, schedule
+    and network check. The setting flags below still apply to one server —
+    the active one, or `--server`.
+
+    Options are remembered, so a later plain `nasync auto` reuses them. Runs
+    until Ctrl+C.
     """
     config = Config()
-    try:
-        if interval is not None:
-            config.set_automation(interval_minutes=interval)
-        if live is not None:
-            config.set_automation(live_sync=live)
-        if at is not None:
-            config.set_automation(scheduled_time=at)
-        if schedule is not None:
-            config.set_automation(scheduled_sync=schedule)
-    except ValueError as e:
-        click.echo(f"❌ {e}", err=True)
-        raise SystemExit(1)
+    if any(v is not None for v in (interval, live, schedule, at)):
+        target = _require_server(config, server)
+        try:
+            if interval is not None:
+                config.set_automation(interval_minutes=interval, server=target)
+            if live is not None:
+                config.set_automation(live_sync=live, server=target)
+            if at is not None:
+                config.set_automation(scheduled_time=at, server=target)
+            if schedule is not None:
+                config.set_automation(scheduled_sync=schedule, server=target)
+        except ValueError as e:
+            click.echo(f"❌ {e}", err=True)
+            raise SystemExit(1)
 
     if show_status:
         click.echo("Automation:")
@@ -818,10 +886,9 @@ def auto(interval, live, schedule, at, show_status, sync_at_start):
             click.echo(line)
         return
 
-    from nasync.core.automation import Automator
+    from nasync.core.automation import run_all
     try:
-        Automator(reporter=click.echo, config=config).run(
-            sync_at_start=sync_at_start)
+        run_all(reporter=click.echo, config=config, sync_at_start=sync_at_start)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
@@ -1078,11 +1145,13 @@ def status():
         wire = "encrypted" if s.get("encrypt") else "not encrypted"
         click.echo(f"    {mark} {s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']})")
         click.echo(f"        connection: {wire}")
+        # Stated per server rather than once for the app: since 0.18.0 these
+        # can differ, and "sync mode: mirror" over a list of servers would be
+        # a claim about all of them.
+        server_mode = config.get_sync_mode(s["name"])
+        click.echo(f"        sync mode:  {server_mode} — {_MODE_HELP[server_mode]}")
 
     click.echo(f"\n  Saved passwords: {config.credentials_status()}")
-
-    current_mode = config.get_sync_mode()
-    click.echo(f"\n  Sync mode: {current_mode} — {_MODE_HELP[current_mode]}")
 
     click.echo("\n  Automatic syncing:")
     for line in _describe_automation(config):

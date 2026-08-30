@@ -104,10 +104,12 @@ nasync add ~/Downloads /downloads
 nasync add ~/Projects /work
 ```
 
-**Pairs belong to a server.** They're added to the active one, so each NAS has
-its own set of folders — your work NAS doesn't inherit your home NAS's pairs.
-Use `--server` to file a pair elsewhere, and `nasync list --all` to see them
-all. Removing a server removes its pairs with it.
+**Pairs belong to a server**, and so do its sync mode and its automatic-sync
+triggers. They're added to the active one, so each NAS has its own set of
+folders and its own rules — your work NAS doesn't inherit your home NAS's
+pairs, its mirror mode, or its 2am schedule. Use `--server` to file a pair
+elsewhere, and `nasync list --all` to see them all. Removing a server removes
+its pairs with it.
 
 > **The server path is relative to the share root — do _not_ repeat the share
 > name in it.** If your share is `backup` and you pass `/docs`, files land in
@@ -167,13 +169,14 @@ you deleted locally since the last sync:
 **Restore is never destructive in either mode.** Pulling from the server adds
 and overwrites local files; local files the server doesn't have are left alone.
 
-Set it once and every front-end follows — `sync`, `watch`, `auto`, and
-the desktop app:
+**The mode belongs to a server**, so a NAS you mirror and one you only ever
+add to are two different rules rather than one compromise. With no `--server`
+these act on the active one, like `nasync add` and `nasync encryption`:
 
 ```bash
-nasync mode              # show the current mode
-nasync mode update       # stop deleting on the server
-nasync mode mirror       # back to an exact copy
+nasync mode                        # the active server's mode
+nasync mode update                 # stop deleting on the active server
+nasync mode mirror --server nas    # and a different rule for another
 ```
 
 Override it for a single run without changing the saved default:
@@ -183,21 +186,21 @@ nasync sync --mode update    # (--no-delete is an alias for this)
 nasync sync --mode mirror
 ```
 
-In the desktop app it's a row on the main page, under **How syncing works** —
-`Mirror` or `Update`, with a line underneath saying what that mode does to
-files on the server. The line above the **Sync** button then spells out the
-run itself (*Mirror · sends 3 folder(s) to 'attic-nas' · deletes server files
-you removed locally*), so a run that deletes is never a surprise. A dry run
+In the desktop app it's on that server's **Settings** tab — `Mirror` or
+`Update`, with a line underneath saying what the mode does to files on the
+server. The line above the **Sync** button then spells out the run itself
+(*Mirror · sends 3 folder(s) to 'attic-nas' · deletes server files you removed
+locally*), so a run that deletes is never a surprise. A dry run
 (`nasync sync --dry-run`, or **Dry run** in the app) lists exactly what would
 be deleted before anything happens.
 
 ## Automatic syncing
 
-Two independent triggers, **both off by default**. Each uses the sync mode
-above. In the desktop app they're on the main page, under **How syncing
-works**: the *Automatic syncing* row reports the current state — `Live · daily
-02:00`, `Paused`, or `Off` — and expands to the switches that change it. The
-same settings are also in menu (⋯) → **Settings** → *Automatic*.
+Two independent triggers, **both off by default**, and — like the mode —
+**set per server**. A home NAS can sync itself every night while a work one
+never does. In the desktop app they're on that server's **Settings** tab; the
+background service and notifications, which are one fact about the machine
+rather than about a server, are in menu (⋯) → **App settings…**.
 
 ### Live sync
 
@@ -206,7 +209,8 @@ Syncs a few seconds after a file changes — the OneDrive-style behaviour.
 ```bash
 nasync live-sync on
 nasync live-sync off
-nasync live-sync              # show the current state
+nasync live-sync                    # show the active server's state
+nasync live-sync on --server work   # or set it for another
 ```
 
 A burst of writes (editors save the same file several times) is coalesced into
@@ -226,7 +230,8 @@ Syncs once a day at a set time:
 
 ```bash
 nasync scheduled-sync on --at 02:00
-nasync scheduled-sync --at 23:30      # change the time
+nasync scheduled-sync --at 23:30                 # change the time
+nasync scheduled-sync on --at 18:00 --server work  # a second NAS, its own slot
 nasync scheduled-sync off
 ```
 
@@ -345,16 +350,18 @@ nasync gui
 
 ![The NASync main window](screenshots/gui-main.png)
 
-Servers are tabs, each owning its own sync pairs, so a tab is the whole context
-for a sync. Reading down: which NAS, which folders, then how syncing works —
-the settings state their current value on the page rather than hiding it
-behind a menu, because this is an app you configure once and afterwards open
-to check on.
+Servers are tabs in the header, each owning its own sync pairs *and* its own
+sync mode and triggers, so a tab is the whole context for a sync. Under it,
+**Server** holds that NAS and its folders and **Settings** holds how it syncs —
+stated with their current values rather than hidden behind a menu, because
+this is an app you configure once and afterwards open to check on.
 
 | | |
 |:--|:--|
-| ![Storage](screenshots/gui-storage.png) | ![Settings](screenshots/gui-settings.png) |
-| **Storage** — what's using space, biggest first, with drill-down | **Settings** — the same settings in full, plus how your passwords are stored |
+| ![A server's settings](screenshots/gui-server-settings.png) | ![Storage](screenshots/gui-storage.png) |
+| **Settings**, per server — its sync mode and its own triggers | **Storage** — what's using space, biggest first, with drill-down |
+| ![App settings](screenshots/gui-settings.png) | ![Editing a server](screenshots/gui-server.png) |
+| **App settings** — the background service, notifications, and how your passwords are stored | **Editing a server** — with a live connection test and the share list |
 
 It's a front-end over the same engine as the CLI:
 
@@ -364,13 +371,13 @@ It's a front-end over the same engine as the CLI:
   list from the server itself.
 - **Sync pairs** — local→server mappings, listed on the page with a real
   folder picker behind the **+** beside the group's title
-- **How syncing works** — the sync mode, automatic syncing and notifications,
-  each row showing its current value: `Mirror` with a line saying what mirror
-  does to server files, and `Live · daily 02:00` / `Paused` / `Off` on a row
-  that expands to the triggers behind it. What a sync deletes and whether one
-  happens by itself are the two things worth seeing without going looking.
-  These are app-wide, which the group says, and Settings holds the same
-  controls in full.
+- **A Settings tab per server** — that server's sync mode and its own live
+  and scheduled triggers, stated with their current values: `Mirror` with a
+  line saying what mirror does to server files, and the triggers that decide
+  whether it syncs by itself. What a sync deletes and whether one happens
+  unattended are the two things worth seeing without going looking.
+  App-wide settings — the background service, notifications and password
+  security — are in menu (⋯) → **App settings…**.
 - **Sync / Dry run / Restore** pinned to the bottom, with **Cancel** at the
   far end of the same row, and the transfer state directly beneath them
 - **Progress for the pair being synced**, with the state (Idle, Syncing…,
@@ -738,10 +745,10 @@ nasync sync
 | `nasync list [--all] [--server NAME]` | Show a server's sync pairs |
 | `nasync remove <name> [--server NAME]` | Remove a sync pair |
 | `nasync sync [--pair NAME] [--mode mirror\|update]` | Incremental sync to server |
-| `nasync mode [mirror\|update]` | Show or set the [sync mode](#sync-mode) |
+| `nasync mode [mirror\|update] [--server NAME]` | Show or set a server's [sync mode](#sync-mode) |
 | `nasync restore [--pair NAME]` | Restore from server (never deletes locally) |
-| `nasync live-sync [on\|off]` | [Live sync](#live-sync) — sync moments after a file changes |
-| `nasync scheduled-sync [on\|off] [--at HH:MM]` | [Scheduled sync](#scheduled-sync) — sync once a day |
+| `nasync live-sync [on\|off] [--server NAME]` | [Live sync](#live-sync) — sync moments after a file changes |
+| `nasync scheduled-sync [on\|off] [--at HH:MM] [--server NAME]` | [Scheduled sync](#scheduled-sync) — sync once a day |
 | `nasync service [status\|on\|off\|restart]` | Manage the [background service](#the-background-service) |
 | `nasync notifications [on\|off] [--test]` | [Desktop notifications](#notifications) for automatic syncs |
 | `nasync auto [--status]` | Run automatic syncing in the foreground |
