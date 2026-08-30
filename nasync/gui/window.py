@@ -336,12 +336,11 @@ class NasyncWindow(Adw.ApplicationWindow):
         return bar
 
     def _build_state_bar(self) -> Gtk.Widget:
-        """What a sync does, and whether one happens by itself — as controls.
+        """Show the sync mode (Mirror/Update) prominently.
 
-        Both were previously a caption here and switches two clicks deep in the
-        menu: readable but not changeable, which is the wrong way round for the
-        mode that deletes on the server. Each button now reports its own state
-        and opens the settings behind it.
+        Mode is critical to display since Mirror mode deletes files. The
+        automation settings moved to quick-setting cards on the home screen,
+        so this bar now just shows mode.
         """
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
@@ -353,15 +352,6 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._mode_button.set_popover(self._mode_popover)
         self._mode_button.set_always_show_arrow(True)
         row.append(self._mode_button)
-
-        self._auto_content = Adw.ButtonContent()
-        self._auto_popover = AutomaticPopover(self.config,
-                                              on_changed=self._on_settings_changed)
-        self._auto_button = Gtk.MenuButton()
-        self._auto_button.set_child(self._auto_content)
-        self._auto_button.set_popover(self._auto_popover)
-        self._auto_button.set_always_show_arrow(True)
-        row.append(self._auto_button)
 
         spacer = Gtk.Box()
         spacer.set_hexpand(True)
@@ -548,17 +538,12 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._notifier.enabled = switch.get_active()
 
     def refresh_summary(self) -> None:
-        """Put the current state on the two buttons that also change it."""
+        """Update the mode button and sync button tooltips."""
         mode = self.config.get_sync_mode()
         label, icon, tooltip = MODE_PRESENTATION[mode]
         self._mode_content.set_label(label)
         self._mode_content.set_icon_name(icon)
         self._mode_button.set_tooltip_text(tooltip)
-
-        icon, label, tooltip = self._automatic_state()
-        self._auto_content.set_icon_name(icon)
-        self._auto_content.set_label(label)
-        self._auto_button.set_tooltip_text(tooltip)
 
         self._sync_button.set_tooltip_text(f"Sync to the server ({mode} mode)")
 
@@ -572,37 +557,6 @@ class NasyncWindow(Adw.ApplicationWindow):
                 self._progress_detail.set_label(
                     f"Sync sends {count} folder(s) to '{active}'." if count
                     else f"'{active}' has no sync pairs yet.")
-
-    def _automatic_state(self) -> tuple:
-        """(icon, label, tooltip) describing automatic syncing at a glance.
-
-        The icon carries the state and the label the detail, so "is this
-        machine syncing by itself?" is answerable without reading. "Paused"
-        earns its own look: the triggers are set up and deliberately not
-        running, which is neither on nor off.
-        """
-        automation = self.config.get_automation()
-        triggers = []
-        if automation["live_sync"]:
-            triggers.append("Live")
-        if automation["scheduled_sync"]:
-            triggers.append(f"daily {automation['scheduled_time']}")
-
-        if not triggers:
-            return ("media-playback-pause-symbolic", "Automatic: off",
-                    "Nothing syncs unless you press Sync. Click to turn on "
-                    "live or scheduled syncing.")
-        if not automation["background"]:
-            return ("media-playback-pause-symbolic", "Paused",
-                    f"{' · '.join(triggers)} are set up, but 'Run in the "
-                    "background' is off, so nothing runs them.")
-
-        icon = ("emblem-synchronizing-symbolic" if automation["live_sync"]
-                else "alarm-symbolic")
-        notifications = ("" if self.config.get_notifications()
-                         else "  Notifications are off.")
-        return (icon, " · ".join(triggers),
-                f"Syncing automatically: {' · '.join(triggers)}.{notifications}")
 
     def toast(self, message: str) -> None:
         self._toasts.add_toast(Adw.Toast(title=message, timeout=3))
