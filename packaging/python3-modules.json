@@ -1,0 +1,70 @@
+{
+    "name": "python3-deps",
+    "buildsystem": "simple",
+    "build-commands": [
+        "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} --no-build-isolation appdirs cffi click cryptography jeepney pycparser pyspnego secretstorage smbprotocol watchdog"
+    ],
+    "sources": [
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/00/2e/d53fa4befbf2cfa713304affc7ca780ce4fc1fd8710527771b58311a3229/click-8.1.7-py3-none-any.whl",
+            "sha256": "ae74fb96c20a0277a1d615f1e4d73c8414f5a98db8b799a7931d1582f3390c28"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/95/a6/d6ef450393dac5734c63c40a131f66808d2e6f59f6165ab38c98fbe4e6ec/watchdog-3.0.0.tar.gz",
+            "sha256": "4d98a320595da7a7c5a18fc48cb633c2e73cda78f93cac2ef42d42bf609a33f9"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/3b/00/2344469e2084fb287c2e0b57b72910309874c3245463acd6cf5e3db69324/appdirs-1.4.4-py2.py3-none-any.whl",
+            "sha256": "a841dacd6b99318a741b166adb07e19ee71a274450e68237b4650ca1055ab128"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/76/d3/250e13e7b3473a0f441f4d680d511ad30ce432d0180115dec9840d88fe89/smbprotocol-1.17.0-py3-none-any.whl",
+            "sha256": "bd1abff5417f5af83ca516a64ab8e5acece3dbdcf58d4e5e23e47f5165a77349"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl",
+            "sha256": "0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/0e/8c/3d0154b8781a371ef1b791063da5a223187dd17738c5b188edc5e9657f9a/pyspnego-0.12.2-py3-none-any.whl",
+            "sha256": "04e7c9260ced15197b3f42b891ffa30fa98c37bb09372c5c2bf927bcdfe30b53"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl",
+            "sha256": "97e5714520c16fc0a45695e5365a2e11b81ea79bba796e26f9f1d178cb182683"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+            "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz",
+            "sha256": "dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be"
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/57/26/e6d4fc8512a51a5f9ee7bfdbfb853bce1197087df40c9ad993ad370b846f/cryptography-50.0.1-cp311-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "sha256": "ff838d62ec1bfce4f9ba7fa16f4a7b554cd8d0c299e6be37502161a660c84eef",
+            "only-arches": [
+                "x86_64"
+            ]
+        },
+        {
+            "type": "file",
+            "url": "https://files.pythonhosted.org/packages/90/34/9ce9a62ed9dc82ca9fd6a34445b6904af56e5f38b3eae2ed32e49c36053d/cryptography-50.0.1-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl",
+            "sha256": "53e279950892dc102c6b4e52af03ae5ea92fac572a1ddab78ca73a997f62b69f",
+            "only-arches": [
+                "aarch64"
+            ]
+        }
+    ]
+}

@@ -1,0 +1,58 @@
+# Flatpak manifest for NASync.
+#
+# Build and install locally:
+#   flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50
+#   flatpak-builder --user --install --force-clean build packaging/io.github.YuvalBogo.NASync.yml
+#   flatpak run io.github.YuvalBogo.NASync
+#
+# `python3-modules.json` pins every runtime dependency with a checksum and is
+# generated — see packaging/README.md for how to refresh it.
+app-id: io.github.YuvalBogo.NASync
+runtime: org.gnome.Platform
+# Matches the runtime already on the developer's machine; bump it and the
+# install line above together.
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: nasync-gui
+
+finish-args:
+  # SMB to the NAS. The whole point of the app; nothing works without it.
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+
+  # NASync syncs folders the user chooses, and which folders those are is not
+  # known until they choose them — a document folder today, an external disk
+  # tomorrow. There is no narrower permission that leaves the app able to do
+  # what it exists for. It never writes outside the folders in its own config.
+  - --filesystem=home
+
+  # Everything else goes through portals, which need no extra permission:
+  #   Background    - starting automatic syncing at login (no systemd in here)
+  #   Notification  - telling you what a background sync did
+  #   Secret        - the key that encrypts saved NAS passwords
+  # Named here as documentation, not as a grant.
+
+modules:
+  - python3-modules.json
+
+  - name: nasync
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --exists-action=i --no-index
+        --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} .
+        --no-build-isolation
+      # The GUI is the app's entry point in a desktop session; the `nasync`
+      # command remains available inside the sandbox for everything else.
+      - install -Dm755 packaging/nasync-gui ${FLATPAK_DEST}/bin/nasync-gui
+      - install -Dm644 packaging/io.github.YuvalBogo.NASync.desktop
+        ${FLATPAK_DEST}/share/applications/io.github.YuvalBogo.NASync.desktop
+      - install -Dm644 packaging/io.github.YuvalBogo.NASync.metainfo.xml
+        ${FLATPAK_DEST}/share/metainfo/io.github.YuvalBogo.NASync.metainfo.xml
+      - install -Dm644 nasync/assets/nasync.svg
+        ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.YuvalBogo.NASync.svg
+    sources:
+      - type: dir
+        path: ..

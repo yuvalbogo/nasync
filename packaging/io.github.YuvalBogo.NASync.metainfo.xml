@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.YuvalBogo.NASync</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>NASync</name>
+  <summary>Sync your folders to a home NAS</summary>
+
+  <description>
+    <p>
+      NASync keeps folders on your computer in step with a SAMBA/SMB share on
+      a home NAS. It speaks SMB 2/3 directly, so there is nothing to install
+      on the server and no external tooling on this side either.
+    </p>
+    <p>Each server you add is configured on its own terms:</p>
+    <ul>
+      <li>
+        A sync root — one folder on the share NASync may touch. Everything
+        else on that share is out of reach, so a video or a photo library
+        sitting beside the root cannot be deleted whatever you sync later.
+      </li>
+      <li>
+        A sync mode. Mirror makes the server match your folders exactly,
+        deleting what you removed locally; Update only ever adds. Restoring
+        never deletes local files in either mode.
+      </li>
+      <li>
+        Automatic syncing — moments after a file changes, once a day at a time
+        you pick, or both. Live sync runs only while you are on the server's
+        network, so a laptop away from home waits and catches up.
+      </li>
+    </ul>
+    <p>
+      Saved NAS passwords are encrypted with a key held for the app by the
+      desktop's secret portal, never written alongside the settings.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.YuvalBogo.NASync.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>A server's folders, with the sync controls pinned below</caption>
+      <image>https://raw.githubusercontent.com/YuvalBogo/nasync/main/screenshots/gui-main.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Each server's own sync mode and automatic triggers</caption>
+      <image>https://raw.githubusercontent.com/YuvalBogo/nasync/main/screenshots/gui-server-settings.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>What is using space on the share, biggest first</caption>
+      <image>https://raw.githubusercontent.com/YuvalBogo/nasync/main/screenshots/gui-storage.png</image>
+    </screenshot>
+  </screenshots>
+
+  <url type="homepage">https://github.com/YuvalBogo/nasync</url>
+  <url type="bugtracker">https://github.com/YuvalBogo/nasync/issues</url>
+  <url type="vcs-browser">https://github.com/YuvalBogo/nasync</url>
+
+  <developer id="io.github.yuvalbogo">
+    <name>Yuval Bogo</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#c8d9f0</color>
+    <color type="primary" scheme_preference="dark">#1c3054</color>
+  </branding>
+
+  <releases>
+    <release version="0.19.0" date="2026-08-30">
+      <description>
+        <p>
+          Adds a sync root per server, so everything beside it on the share is
+          unreachable rather than merely untargeted. Fixes notifications not
+          appearing on GNOME 50, a copy producing one notification per file,
+          and mirror mode leaving empty folders behind.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

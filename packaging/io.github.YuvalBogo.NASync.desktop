@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=NASync
+GenericName=NAS Folder Sync
+Comment=Sync your local folders to a SAMBA home NAS
+Exec=nasync-gui
+Icon=io.github.YuvalBogo.NASync
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=samba;smb;cifs;nas;sync;backup;mirror;
+StartupNotify=true
+StartupWMClass=io.github.YuvalBogo.NASync
+X-GNOME-UsesNotifications=true

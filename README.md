@@ -481,6 +481,22 @@ It's a front-end over the same engine as the CLI:
 - **Notifications for syncs you aren't watching** — switch away mid-transfer
   and the result comes to you instead of waiting on screen
 
+### Building the Flatpak
+
+The desktop app is packaged for Flatpak, which carries its own GTK4 and
+libadwaita — so it runs on distributions too old to have them, which is what
+makes it the answer for Ubuntu 22.04, Debian 12 and Fedora 39.
+
+```bash
+flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50
+flatpak-builder --user --install --force-clean build \
+    packaging/io.github.YuvalBogo.NASync.yml
+flatpak run io.github.YuvalBogo.NASync
+```
+
+It is not on Flathub yet. See [`packaging/README.md`](packaging/README.md) for
+how the dependency pinning works and what a submission would need.
+
 ### Installing the dependencies
 
 PyGObject, GTK4 and libadwaita are system packages, not pip installs.

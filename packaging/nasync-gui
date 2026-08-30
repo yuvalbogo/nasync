@@ -1,0 +1,5 @@
+#!/bin/sh
+# The desktop entry point. `nasync` is a command group whose default is help,
+# which would open a window-less app from a launcher; this is the one thing a
+# desktop launcher should do.
+exec nasync gui "$@"
