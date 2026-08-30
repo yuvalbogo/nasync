@@ -2,6 +2,77 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0] - 2026-08-30
+
+### Added
+- **A sync root per server — the folder NASync is allowed to touch.** Every
+  sync pair lives inside it, and nothing beside it on the share can be reached.
+  A video or a photo library sitting next to the root is safe from a mirror
+  sync permanently, rather than only for as long as nobody points a pair at it
+  by mistake.
+
+  This replaces a guarantee that was never really one. Mirror mode deletes
+  whatever is in range and not on your machine, and until now "in range" meant
+  "wherever the pairs happen to point" — so a folder was protected only by the
+  absence of a mistake, and the mistake that would expose it (adding a pair
+  with the wrong destination) looks completely ordinary while you make it.
+
+  - Pair destinations are stored **relative to the root** and joined at sync
+    time, so a pair cannot name a path outside it. `..` is refused when the
+    pair is created, with the error in front of the person making it rather
+    than in a log at 2am.
+  - A destination of `/` used to mean the whole share, which put every file on
+    it one mirror sync away from deletion. With a root it means the root.
+  - `nasync init` and `nasync setup` ask for the root and explain what it
+    protects; the desktop app's server dialog has the same field, and warns
+    when a server has none.
+  - New `nasync root [PATH] [--server NAME]` shows or changes it. Changing it
+    on a server that already has pairs lists where each one would move, says so
+    plainly if the server is on mirror mode, and asks before doing it.
+  - `nasync list` and `nasync status` show the root and the **resolved**
+    destination of every pair — where files actually land is the thing worth
+    checking before a mirror run, not where the config abbreviates them to.
+  - The desktop app's folder browser starts at the root and will not navigate
+    above it, so a folder a pair could not legally name is never offered.
+
+  **Existing servers are unchanged.** A server without a root keeps syncing
+  exactly where it did, with the whole share in range as before; the guarantee
+  is opted into rather than imposed on a share layout NASync cannot see. Set
+  one with `nasync root <folder>` or in the server editor.
+
+### Fixed
+- **Mirror mode left empty folders behind.** It deleted the files a folder held
+  but never the folder, so the server ended up matching the local tree in
+  content but not in shape, accumulating empty directories every time one was
+  removed locally. The remote walk now collects directories as well as files,
+  and a mirror run removes the ones with no local counterpart, deepest first.
+  Each removal is an `rmdir`, which refuses a directory that still contains
+  anything — that refusal is the guard: a folder holding something unaccounted
+  for is left alone rather than forced.
+- **Live sync sliced a file copy into dozens of runs.** The watcher waited two
+  seconds for file activity to stop — tuned for an editor saving repeatedly,
+  and far too short for a folder being copied in, where a two-second lull is
+  ordinary. Each lull started a full sync, and a sync re-indexes the whole
+  pair: minutes of work on a 20k-file folder to move one file. The wait is now
+  ten seconds, which still feels immediate after a save.
+- **A single copy produced a column of notifications.** Live sync fires once
+  per lull in file activity, and a lull is not the end of the job — copying a
+  folder in triggers a run every couple of seconds, each moving a file or two,
+  each announcing "1 transferred". Runs are now batched: the totals accumulate
+  and one notification reports them together once 20 seconds pass with nothing
+  further, saying how many runs it took when it was more than one. Syncing
+  itself is unchanged and still prompt; only the telling waits. A service
+  stopped mid-burst flushes what it has rather than swallowing it.
+- **`--dry-run` could not answer the question it exists for.** A push dry run
+  skipped connecting, on the grounds that it "only reads local disk" — which is
+  untrue for mirror mode, where working out what would be deleted requires
+  indexing the destination. Asking "what will this delete before I let it?"
+  either errored or, with no session, reported nothing to delete. Dry runs now
+  connect, and list every file a mirror would remove.
+- Server paths are normalised the way people actually type them: leading and
+  trailing whitespace, duplicate slashes and backslashes are cleaned, while a
+  folder genuinely called `Marrige video` keeps its space.
+
 ## [0.18.1] - 2026-08-30
 
 ### Fixed

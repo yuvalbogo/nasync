@@ -591,7 +591,7 @@ def test_colon_names_are_skipped_not_silently_truncated():
     """Samba turns 'note:x.txt' into 'note' and loses the contents — so a
     colon has to be caught here rather than shipped to the server."""
     client = _client(_FakeSMB())
-    client._remote_file_map = lambda base: {}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "safe.txt").write_text("ok")
         Path(tmpdir, "note:stream.txt").write_text("would be lost")
@@ -605,7 +605,7 @@ def test_colon_names_are_skipped_not_silently_truncated():
 def test_legal_awkward_filenames_still_sync():
     """Apostrophes, spaces and unicode are legal and must not be filtered."""
     client = _client(_FakeSMB())
-    client._remote_file_map = lambda base: {}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "has'apostrophe.txt").write_text("a")
         Path(tmpdir, "with space.txt").write_text("s")
@@ -622,7 +622,7 @@ def test_legal_awkward_filenames_still_sync():
 # --------------------------------------------------------------------------- #
 def test_push_dry_run_discovers_files():
     client = _client(_FakeSMB())
-    client._remote_file_map = lambda base: {}   # empty remote -> all new
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}   # empty remote -> all new
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "a.txt").write_text("a")
         os.makedirs(os.path.join(tmpdir, "sub", "deep"))
@@ -643,7 +643,7 @@ def test_push_incremental_plan():
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "a.txt").write_text("aaaa")   # 4 bytes, unchanged remotely
         Path(tmpdir, "b.txt").write_text("bb")     # new
-        client._remote_file_map = lambda base: {"a.txt": 4, "stale.txt": 9}
+        client._remote_file_map = lambda base, dirs=None, on_scan=None: {"a.txt": 4, "stale.txt": 9}
 
         stats = client.sync_directory(tmpdir, "/mir", direction="push", dry_run=True)
         assert stats["transferred"] == 1, stats   # only b.txt
@@ -667,7 +667,7 @@ def test_push_uploads_and_mirrors_deletes():
     """A real (faked) push writes changed files and removes server-only ones."""
     fake = _FakeSMB()
     client = _client(fake)
-    client._remote_file_map = lambda base: {"stale.txt": 9}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {"stale.txt": 9}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "new.txt").write_text("hello")
 
@@ -689,7 +689,7 @@ def test_directories_are_created_once_each_not_once_per_file():
     """
     fake = _FakeSMB()
     client = _client(fake)
-    client._remote_file_map = lambda base: {}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         os.makedirs(os.path.join(tmpdir, "photos", "2024", "june"))
         for name in ("a.jpg", "b.jpg", "c.jpg"):
@@ -717,7 +717,7 @@ def test_push_in_update_mode_uploads_but_deletes_nothing():
     """Update mode still uploads; it just never removes server-only files."""
     fake = _FakeSMB()
     client = _client(fake)
-    client._remote_file_map = lambda base: {"stale.txt": 9}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {"stale.txt": 9}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "new.txt").write_text("hello")
 
@@ -736,7 +736,7 @@ def test_update_mode_dry_run_promises_no_deletes():
     """The dry run is what a user checks before trusting the mode."""
     lines = []
     client = _client(_FakeSMB(), reporter=lines.append)
-    client._remote_file_map = lambda base: {"stale.txt": 9}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {"stale.txt": 9}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "new.txt").write_text("hello")
 
@@ -755,7 +755,7 @@ def test_pull_skips_files_that_match_locally():
     client = _client(_FakeSMB())
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "same.txt").write_text("1234")     # 4 bytes, matches remote
-        client._remote_file_map = lambda base: {"same.txt": 4, "missing.txt": 6}
+        client._remote_file_map = lambda base, dirs=None, on_scan=None: {"same.txt": 4, "missing.txt": 6}
 
         stats = client.sync_directory(tmpdir, "/base", direction="pull", dry_run=True)
         assert stats["skipped"] == 1, stats     # same.txt
@@ -799,7 +799,7 @@ def test_file_progress_signature_unchanged():
         _FakeSMB(),
         progress=lambda done, total, name, verb: seen.append((done, total, name, verb)),
     )
-    client._remote_file_map = lambda base: {}
+    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "one.txt").write_text("x")
         client.sync_directory(tmpdir, "/base", direction="push")

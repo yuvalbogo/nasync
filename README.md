@@ -14,6 +14,9 @@ backup and file sync.
 - 🔄 **Bidirectional Sync**: Push local changes to server or restore from backup
 - 🪞 **Mirror or Update**: choose whether a sync deletes server files you removed
   locally, or only ever adds — see [Sync mode](#sync-mode)
+- 🛡️ **A sync root per server**: one folder NASync may touch, so everything
+  beside it is unreachable no matter how you configure a pair — see
+  [The sync root](#the-sync-root)
 - 🎯 **Simple Configuration**: Guided `nasync setup` with a built-in connection test
 - 🖥️ **Desktop App**: A native GTK4/libadwaita window (`nasync gui`) — see [below](#desktop-app)
 - ⚡ **Live sync**: sync moments after a file changes — but only on your home
@@ -83,6 +86,8 @@ You'll be prompted for:
 - SAMBA password
 - Share name (default: `backup`)
 - SMB port (default: `445` — press Enter unless your server uses a custom port)
+- The [sync root](#the-sync-root) — the one folder on the share NASync may
+  touch (default: `nasync`)
 
 Then confirm it all works before going further:
 
@@ -111,10 +116,10 @@ pairs, its mirror mode, or its 2am schedule. Use `--server` to file a pair
 elsewhere, and `nasync list --all` to see them all. Removing a server removes
 its pairs with it.
 
-> **The server path is relative to the share root — do _not_ repeat the share
-> name in it.** If your share is `backup` and you pass `/docs`, files land in
-> `backup/docs` on the server. Passing `/backup/docs` would create a *nested*
-> `backup/backup/docs`.
+> **The server path is relative to the server's [sync root](#the-sync-root) —
+> do _not_ repeat the share or root name in it.** With the share `backup` and
+> the root `nasync`, passing `/docs` lands files in `backup/nasync/docs`.
+> Passing `/nasync/docs` would nest them at `backup/nasync/nasync/docs`.
 
 ### 3. List Your Configuration
 
@@ -155,6 +160,50 @@ Remove a sync pair:
 nasync remove Documents
 ```
 
+## The sync root
+
+**Each server has one folder on the share that NASync is allowed to touch.**
+Every sync pair lives inside it, and nothing beside it can be reached — so a
+video, a photo library or anything else sitting next to the root is safe
+whatever you sync later, and whichever sync mode you pick.
+
+```
+Storage:/                        the share
+├── nasync/                      ← the sync root: NASync works in here
+│   ├── Documents/               a pair's destination
+│   └── Pictures/                another
+├── Marrige video/               ← beside the root: unreachable, always
+└── old-backups/                 ← same
+```
+
+This exists because [mirror mode](#sync-mode) deletes. Without a root, what a
+mirror sync could delete was "wherever the pairs happen to point" — so a folder
+was protected only by the absence of a mistake, and the mistake that exposes it
+(adding a pair with the wrong destination) looks entirely ordinary while you're
+making it. A root turns *nothing points there* into **nothing can point
+there**.
+
+```bash
+nasync root                    # show this server's root
+nasync root media/nasync       # set it
+nasync root --server work      # another server's
+```
+
+`nasync init` and `nasync setup` ask for it when you add a server, and the
+desktop app has the same field in its server editor — and says so when a server
+doesn't have one.
+
+A pair's destination is relative to the root, so `Documents` on the root
+`nasync` lands at `Storage:/nasync/Documents`. Paths that would climb out of it
+(`../elsewhere`) are refused when the pair is created rather than at sync time,
+and a destination of `/` means the root itself rather than the whole share.
+`nasync list` and `nasync status` show where each pair actually resolves to.
+
+> **Servers made before 0.19.0 have no root** and keep syncing exactly where
+> they did, with the whole share in range as before. Set one with `nasync root
+> <folder>` — the pairs' destinations stay as they are and simply become
+> relative to it, so check `nasync list` afterwards.
+
 ## Sync mode
 
 A sync always uploads new and changed files. The mode decides what happens to
@@ -168,6 +217,14 @@ you deleted locally since the last sync:
 
 **Restore is never destructive in either mode.** Pulling from the server adds
 and overwrites local files; local files the server doesn't have are left alone.
+
+**What mirror can delete is bounded by the [sync root](#the-sync-root)** — it
+only ever removes things inside that folder, so anything beside it on the share
+is out of reach. Check what a switch to mirror would do before making it:
+
+```bash
+nasync sync --dry-run --mode mirror    # lists every file it would delete
+```
 
 **The mode belongs to a server**, so a NAS you mirror and one you only ever
 add to are two different rules rather than one compromise. With no `--server`
@@ -327,6 +384,11 @@ Notifications go through your desktop's notification portal inside a Flatpak,
 and `gdbus` (part of glib2) or `notify-send` elsewhere. `nasync notifications
 --test` names which one it used.
 
+**One notification per burst, not per file.** Live sync fires once per lull in
+file activity, so copying a folder in runs several syncs; their results are
+batched and reported together once things settle, rather than one banner per
+run.
+
 **A sync that changed nothing doesn't notify.** A run reports when it moved
 files, removed them, or hit errors, and a scheduled run that couldn't happen
 at all still speaks up at critical urgency — but a daily "0 transferred" would
@@ -334,6 +396,29 @@ only train you to ignore the one message that matters. `nasync status` says
 what automatic syncing is doing whenever you want to check. On a machine with none of them — a headless
 server, a locked-down container — syncing carries on exactly as before,
 silently.
+
+#### When notifications don't appear
+
+`nasync notifications --test` sends one immediately and names the transport it
+used. If it reports success and nothing appears, the notification is being
+accepted and then discarded — which a desktop does silently, so nothing in
+NASync's own output will say so. Watch the bus to see what happens to it:
+
+```bash
+dbus-monitor --session "interface='org.freedesktop.Notifications'"
+```
+
+A `NotificationClosed` signal arriving milliseconds after the `Notify` call
+means the shell threw it away. That is what GNOME Shell 50 did to every
+notification carrying a `desktop-entry` hint, which NASync no longer sends —
+see 0.18.1 in the changelog.
+
+For a background sync that failed with an unhelpful message, run the service
+with tracebacks turned on:
+
+```bash
+systemctl --user edit nasync-auto.service   # add: Environment=NASYNC_DEBUG=1
+```
 
 ### Moving from pip to the Flatpak
 
@@ -751,6 +836,7 @@ nasync sync
 | `nasync list [--all] [--server NAME]` | Show a server's sync pairs |
 | `nasync remove <name> [--server NAME]` | Remove a sync pair |
 | `nasync sync [--pair NAME] [--mode mirror\|update]` | Incremental sync to server |
+| `nasync root [PATH] [--server NAME]` | Show or set a server's [sync root](#the-sync-root) |
 | `nasync mode [mirror\|update] [--server NAME]` | Show or set a server's [sync mode](#sync-mode) |
 | `nasync restore [--pair NAME]` | Restore from server (never deletes locally) |
 | `nasync live-sync [on\|off] [--server NAME]` | [Live sync](#live-sync) — sync moments after a file changes |

@@ -791,3 +791,20 @@ def test_changing_the_root_moves_every_pair_with_it():
         c.set_root("backups/laptop", server="nas")
         assert c.resolve_remote("Documents") == "backups/laptop/Documents"
         print("✅ test_changing_the_root_moves_every_pair_with_it passed")
+
+
+def test_remote_paths_are_cleaned_the_way_people_type_them():
+    """These come from text fields and pasted paths. " /backups/ " has to mean
+    the same folder as "backups" — while a folder genuinely called
+    "Marrige video" keeps its space."""
+    from nasync.core.config import normalize_remote
+    assert normalize_remote("  /backups/laptop/ ") == "backups/laptop"
+    assert normalize_remote("Marrige video") == "Marrige video"
+    assert normalize_remote(" Marrige video / clips ") == "Marrige video/clips"
+    assert normalize_remote("a//b") == "a/b"
+    assert normalize_remote("/") == ""
+    assert normalize_remote("   ") == ""
+    assert normalize_remote(None) == ""
+    # Backslashes too: someone reading a path off a Windows machine.
+    assert normalize_remote(r"backups\\laptop") == "backups/laptop"
+    print("✅ test_remote_paths_are_cleaned_the_way_people_type_them passed")

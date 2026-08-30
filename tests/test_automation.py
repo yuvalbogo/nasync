@@ -224,6 +224,9 @@ def test_a_background_sync_announces_itself(monkeypatch, recording_notifier):
         automator = Automator(reporter=lambda _m: None, config=config,
                               notifier=recording_notifier)
         assert automator.sync_now("file changed") is True
+        # The summary waits for the burst to go quiet; flushing is what the
+        # timer does 20 seconds later, and is how a test sees it now.
+        automator.flush_notification()
 
         started, finished = recording_notifier.sent
         assert started[0] == "Syncing…"
@@ -242,8 +245,10 @@ def test_a_sync_with_errors_says_so_in_the_notification(monkeypatch, recording_n
                                           "transferred": 1, "skipped": 0,
                                           "deleted": 0})
 
-        Automator(reporter=lambda _m: None, config=config,
-                  notifier=recording_notifier).sync_now("startup")
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        automator.sync_now("startup")
+        automator.flush_notification()
 
         summary, _body, urgency = recording_notifier.sent[-1]
         assert summary == "Sync finished with 2 error(s)"
@@ -757,7 +762,9 @@ def test_a_run_that_moved_something_still_reports(monkeypatch,
         monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
         _fake_syncer(monkeypatch)          # the default result transfers 3
 
-        _quiet_automator(config, recording_notifier).sync_now("file changed")
+        automator = _quiet_automator(config, recording_notifier)
+        automator.sync_now("file changed")
+        automator.flush_notification()
         summaries = [sent[0] for sent in recording_notifier.sent]
         assert any("complete" in s.lower() for s in summaries), summaries
         print("✅ test_a_run_that_moved_something_still_reports passed")
@@ -772,7 +779,9 @@ def test_a_quiet_run_with_failures_still_reports(monkeypatch,
         monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
         _fake_syncer(monkeypatch, result={**_NOTHING_CHANGED, "errors": 2})
 
-        _quiet_automator(config, recording_notifier).sync_now("file changed")
+        automator = _quiet_automator(config, recording_notifier)
+        automator.sync_now("file changed")
+        automator.flush_notification()
         summaries = [sent[0] for sent in recording_notifier.sent]
         assert any("error" in s.lower() for s in summaries), summaries
         print("✅ test_a_quiet_run_with_failures_still_reports passed")
@@ -786,7 +795,86 @@ def test_deletions_alone_are_worth_reporting(monkeypatch, recording_notifier):
         monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
         _fake_syncer(monkeypatch, result={**_NOTHING_CHANGED, "deleted": 4})
 
-        _quiet_automator(config, recording_notifier).sync_now("scheduled 02:00")
+        automator = _quiet_automator(config, recording_notifier)
+        automator.sync_now("scheduled 02:00")
+        automator.flush_notification()
         summaries = [sent[0] for sent in recording_notifier.sent]
         assert any("complete" in s.lower() for s in summaries), summaries
         print("✅ test_deletions_alone_are_worth_reporting passed")
+
+
+# --------------------------------------------------------------------------- #
+# One notification per burst, not per run (0.19.0)
+# --------------------------------------------------------------------------- #
+def test_a_burst_of_runs_produces_one_notification(monkeypatch,
+                                                   recording_notifier):
+    """Live sync fires once per lull in file activity, so copying a folder in
+    produces a run every couple of seconds moving a file or two. One
+    notification apiece turned a single action into a column of near-identical
+    "1 transferred" banners."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result={"ok": 1, "failed": 0, "transferred": 1,
+                                          "skipped": 0, "deleted": 0,
+                                          "errors": 0, "unsupported": 0})
+        automator = _quiet_automator(config, recording_notifier)
+        for _ in range(7):
+            automator.sync_now("file changed")
+
+        # Nothing said yet — the burst hasn't gone quiet.
+        assert [s[0] for s in recording_notifier.sent] == ["Syncing…"]
+
+        automator.flush_notification()
+        summaries = [s[0] for s in recording_notifier.sent]
+        assert summaries == ["Syncing…", "Sync complete"], summaries
+        body = recording_notifier.sent[-1][1]
+        # The totals cover the whole burst, and say how many runs it took —
+        # otherwise 7 would read as one improbable transfer.
+        assert "7 transferred" in body, body
+        assert "7 syncs" in body, body
+        print("✅ test_a_burst_of_runs_produces_one_notification passed")
+
+
+def test_one_run_alone_does_not_mention_a_run_count(monkeypatch,
+                                                    recording_notifier):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)
+        automator = _quiet_automator(config, recording_notifier)
+        automator.sync_now("file changed")
+        automator.flush_notification()
+        assert "syncs" not in recording_notifier.sent[-1][1]
+        print("✅ test_one_run_alone_does_not_mention_a_run_count passed")
+
+
+def test_stopping_mid_burst_still_reports_what_moved(monkeypatch,
+                                                     recording_notifier):
+    """Being stopped is not a reason to swallow what a burst already did."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)
+        automator = _quiet_automator(config, recording_notifier)
+        automator.sync_now("file changed")
+        assert [s[0] for s in recording_notifier.sent] == ["Syncing…"]
+
+        automator.stop()
+        assert "Sync complete" in [s[0] for s in recording_notifier.sent]
+        print("✅ test_stopping_mid_burst_still_reports_what_moved passed")
+
+
+def test_the_syncing_banner_is_not_reposted_during_a_burst(monkeypatch,
+                                                           recording_notifier):
+    """Re-posting "Syncing…" over a summary that hasn't been sent yet would be
+    the same flood in a different order."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)
+        automator = _quiet_automator(config, recording_notifier)
+        for _ in range(5):
+            automator.sync_now("file changed")
+        assert [s[0] for s in recording_notifier.sent].count("Syncing…") == 1
+        print("✅ test_the_syncing_banner_is_not_reposted_during_a_burst passed")

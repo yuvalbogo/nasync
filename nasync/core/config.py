@@ -89,8 +89,13 @@ def normalize_remote(path: str) -> str:
     contain ".." would be able to name a folder outside its server's sync
     root, which is the entire thing the root exists to prevent.
     """
-    cleaned = (path or "").replace("\\", "/").strip("/")
-    parts = [part for part in cleaned.split("/") if part not in ("", ".")]
+    # Whitespace as well as slashes: these arrive from text fields and from
+    # people pasting paths, and " /backups/ " must mean the same folder as
+    # "backups". Stripped per segment too, but only at the edges — a folder
+    # genuinely called "Marrige video" has to survive intact.
+    cleaned = (path or "").replace("\\", "/").strip().strip("/")
+    parts = [part.strip() for part in cleaned.split("/")]
+    parts = [part for part in parts if part not in ("", ".")]
     if any(part == ".." for part in parts):
         raise ValueError(
             "A server path can't contain '..' — it has to stay inside the "

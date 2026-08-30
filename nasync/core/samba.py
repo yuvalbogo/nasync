@@ -408,7 +408,7 @@ class SAMBAClient:
         entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
         return entries
 
-    def _remote_file_map(self, base: str, on_scan=None) -> dict:
+    def _remote_file_map(self, base: str, on_scan=None, dirs: set = None) -> dict:
         """Return ``{posix_relative_path: size}`` for every file beneath `base`.
 
         One listing round trip per *directory*, and no ``stat()`` at all in the
@@ -421,6 +421,11 @@ class SAMBAClient:
         needed asking for twice.
 
         An empty dict means the destination doesn't exist yet (first sync).
+
+        Pass a set as ``dirs`` to also collect every directory beneath `base`,
+        relative to it. Mirror mode needs them: deleting only files leaves the
+        folders that held them standing empty, so the server ends up matching
+        the local tree in content but not in shape.
 
         ``on_scan(directories_done, files_seen)`` is called once per directory
         for callers that show this to a person. Sync doesn't pass it — it has
@@ -443,6 +448,8 @@ class SAMBAClient:
                             if size is not None:
                                 files[rel] = size
                         elif entry.is_dir(follow_symlinks=False):
+                            if dirs is not None:
+                                dirs.add(rel)
                             pending.append((entry.path, rel))
                         else:
                             files[rel] = entry.smb_info.end_of_file
@@ -675,6 +682,23 @@ class SAMBAClient:
             raise self._fail(e)
 
     @staticmethod
+    def _stale_dirs(remote_dirs: set, local_map: dict) -> list:
+        """Server directories with no counterpart locally, deepest first.
+
+        Deepest first so a nested tree empties from the inside out; each removal
+        is an ``rmdir``, which refuses a directory that still has anything in
+        it. That refusal is the safety property — a folder holding something
+        unaccounted for is left alone rather than forced.
+        """
+        local_dirs = set()
+        for rel in local_map:
+            parts = rel.split("/")[:-1]
+            for depth in range(len(parts)):
+                local_dirs.add("/".join(parts[:depth + 1]))
+        return sorted((d for d in remote_dirs if d not in local_dirs),
+                      key=lambda d: d.count("/"), reverse=True)
+
+    @staticmethod
     def _leaf_dirs(dirs: set) -> list:
         """Drop every directory in `dirs` that is an ancestor of another.
 
@@ -784,7 +808,10 @@ class SAMBAClient:
         local_map, unsupported = self._local_file_map(local_dir)
 
         # --- 2. index remote files, then diff ---
-        remote_map = self._remote_file_map(base)
+        # Directories too when mirroring: files alone leave empty folders
+        # behind, so the server matches the local tree in content but not shape.
+        remote_dirs = set() if mirror else None
+        remote_map = self._remote_file_map(base, dirs=remote_dirs)
         to_upload = sorted(r for r in local_map
                            if r not in remote_map or remote_map[r] != local_map[r][1])
         unchanged = [r for r in local_map
@@ -792,8 +819,11 @@ class SAMBAClient:
         to_delete = sorted(r for r in remote_map if r not in local_map) if mirror else []
 
         if dry_run:
+            stale = self._stale_dirs(remote_dirs or set(), local_map) if mirror else []
             self._report(f"  [dry-run] {len(to_upload)} to upload, "
-                         f"{len(unchanged)} unchanged, {len(to_delete)} to delete")
+                         f"{len(unchanged)} unchanged, {len(to_delete)} to delete"
+                         + (f", {len(stale)} empty folder(s) to remove"
+                            if stale else ""))
             for r in to_upload:
                 self._report(f"    ↑ {r}")
             for r in to_delete:
@@ -846,14 +876,31 @@ class SAMBAClient:
             except Exception as e:
                 errors.append(f"{rel}: {self._friendly_error(e)}")
 
+        # --- 5. and the directories those deletes emptied ---
+        removed_dirs = 0
+        for rel in self._stale_dirs(remote_dirs or set(), local_map):
+            self._check_cancelled()
+            try:
+                smbclient.rmdir(self._unc(base, rel.replace("/", "\\")),
+                                **self._opts)
+                removed_dirs += 1
+            except Exception:
+                # Not empty, or already gone. Both are fine: rmdir refusing a
+                # directory with something still in it is the guard, not a
+                # failure worth reporting.
+                pass
+
         self._report(f"  Uploaded {transferred} · unchanged {len(unchanged)} · "
-                     f"deleted {deleted}")
+                     f"deleted {deleted}"
+                     + (f" · removed {removed_dirs} empty folder(s)"
+                        if removed_dirs else ""))
         for rel in unsupported:
             self._report(f"  ! skipped (name illegal on SMB): {rel}")
         for message in errors:
             self._report(f"  ! {message}")
         return {"transferred": transferred, "skipped": len(unchanged),
-                "deleted": deleted, "errors": len(errors),
+                "deleted": deleted, "deleted_dirs": removed_dirs,
+                "errors": len(errors),
                 "unsupported": len(unsupported)}
 
     # ------------------------------------------------------------------ #

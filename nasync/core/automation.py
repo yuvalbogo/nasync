@@ -90,9 +90,14 @@ class Automator:
 
     # How long to wait before re-checking a config file that hasn't changed.
     TICK = 1.0
-    # Editors write a file several times in quick succession; sync once, after
-    # the last of them.
-    DEBOUNCE = 2.0
+    # How long file activity must stop before a sync starts. Two seconds was
+    # tuned for an editor saving the same file several times, and is far too
+    # short for the other thing that happens to a watched folder: copying one
+    # in. A two-second lull mid-copy is ordinary, so each lull started a full
+    # sync — and a sync re-indexes the whole pair, which on a 20k-file folder
+    # is minutes of work to move one file. Ten seconds still feels immediate
+    # for a save and stops a copy from being sliced into dozens of runs.
+    DEBOUNCE = 10.0
     # How long a "am I on the home network?" answer is trusted. Without this a
     # pending scheduled sync would re-probe the network every tick; with it,
     # coming home is still noticed within half a minute.
@@ -102,6 +107,13 @@ class Automator:
     # second — so without a gap here a NAS that rejects everything would be
     # hammered with a full sync attempt per second until midnight.
     SCHEDULED_RETRY_SECONDS = 900.0
+    # How long after a run to wait for another before saying anything. Live
+    # sync fires once per lull in file activity, and a lull is not the end of
+    # the job: copying a folder in produces a run every couple of seconds, each
+    # moving a file or two. Notifying per run turned one action into a column
+    # of "1 transferred" banners. The syncing itself stays prompt; only the
+    # telling waits, and what it then says covers everything that happened.
+    NOTIFY_QUIET_SECONDS = 20.0
 
     def __init__(self, reporter=print, config=None, notifier=None,
                  server: str = None, sync_lock=None):
@@ -130,6 +142,11 @@ class Automator:
         self._lan_reason_at = None
         # When a wholly-failed scheduled run may be attempted again.
         self._scheduled_retry_at = None
+        # Results accumulated since the last notification, and the timer that
+        # will report them. Touched from the timer thread as well as the loop.
+        self._pending = None
+        self._notify_timer = None
+        self._notify_lock = threading.Lock()
 
     # ------------------------------------------------------------------ #
     # Syncing
@@ -265,44 +282,99 @@ class Automator:
         return self.server or self.config.get_active_server_name() or "your NAS"
 
     def _notify_started(self, trigger: str) -> None:
+        """Say a sync is under way — once per burst, not once per run.
+
+        A burst is already being reported on if something is pending, and
+        re-posting "Syncing…" over a summary that has not been sent yet would
+        be the same flood in a different order.
+        """
+        with self._notify_lock:
+            if self._pending is not None:
+                return
         self._notifier.notify(
             "Syncing…",
             f"{self._server_label()}  ·  started by {trigger or 'request'}")
 
     def _notify_finished(self, result: dict) -> None:
-        """Replace the "started" notification with what the run achieved.
+        """Fold a run into the pending summary, and report once it goes quiet.
 
         **A run that changed nothing says nothing.** Most scheduled runs over
         stable folders move no files, and a daily "0 transferred" is the kind
         of noise that teaches people to ignore — or switch off — the channel
-        that also carries "your scheduled sync didn't run". The reassurance
-        that automatic syncing is alive is available on demand in `nasync
-        status` and in the app; it does not need to interrupt.
+        that also carries "your scheduled sync didn't run".
 
-        The "Syncing…" banner is already up by this point, so a quiet run
-        *withdraws* it rather than leaving it there for good.
+        **Runs that did change something are batched.** Live sync fires once
+        per lull in file activity, so copying a folder in produces a series of
+        runs moving a file or two each; one notification apiece turned a single
+        action into a column of near-identical banners. The totals accumulate
+        and a timer reports them together once `NOTIFY_QUIET_SECONDS` pass with
+        nothing further — so what arrives describes the whole thing that
+        happened rather than the last slice of it.
 
-        Errors are left at normal urgency: a couple of files that didn't copy
-        say so in the summary, but they don't warrant a notification that sits
-        on screen until dismissed the way a run that never happened does.
+        The "Syncing…" banner is already up by this point, so a burst that
+        turns out to have moved nothing *withdraws* it rather than leaving it.
         """
         problems = result.get("failed", 0) + result.get("errors", 0)
         # `unsupported` counts as worth mentioning: those files were skipped
         # because SMB rejects their names, which is a thing to act on rather
         # than a quiet success.
         moved = (result.get("transferred", 0) + result.get("deleted", 0)
-                 + result.get("unsupported", 0))
+                 + result.get("deleted_dirs", 0) + result.get("unsupported", 0))
         if not moved and not problems:
-            self._notifier.close()
+            with self._notify_lock:
+                idle = self._pending is None
+            if idle:
+                self._notifier.close()
             return
+
+        with self._notify_lock:
+            if self._pending is None:
+                self._pending = dict.fromkeys(
+                    ("transferred", "skipped", "deleted", "deleted_dirs",
+                     "errors", "failed", "unsupported"), 0)
+                self._pending["runs"] = 0
+            for key in self._pending:
+                if key != "runs":
+                    self._pending[key] += result.get(key, 0)
+            self._pending["runs"] += 1
+
+            if self._notify_timer is not None:
+                self._notify_timer.cancel()
+            self._notify_timer = threading.Timer(self.NOTIFY_QUIET_SECONDS,
+                                                 self.flush_notification)
+            self._notify_timer.daemon = True
+            self._notify_timer.start()
+
+    def flush_notification(self) -> None:
+        """Send the accumulated summary now, if there is one.
+
+        Called by the quiet timer, and directly on shutdown — a service being
+        stopped mid-burst should still say what it moved rather than swallowing
+        it.
+        """
+        with self._notify_lock:
+            totals = self._pending
+            self._pending = None
+            if self._notify_timer is not None:
+                self._notify_timer.cancel()
+                self._notify_timer = None
+        if not totals:
+            return
+
+        problems = totals["failed"] + totals["errors"]
         counts = "  ·  ".join([
-            f"{result.get('transferred', 0)} transferred",
-            f"{result.get('skipped', 0)} unchanged",
-            f"{result.get('deleted', 0)} removed",
+            f"{totals['transferred']} transferred",
+            f"{totals['skipped']} unchanged",
+            f"{totals['deleted']} removed",
         ])
+        # Only worth saying how many runs it took when it was more than one:
+        # "in 7 syncs" explains a number that would otherwise look like a
+        # single improbably large transfer.
+        runs = f"  ·  {totals['runs']} syncs" if totals["runs"] > 1 else ""
         self._notifier.notify(
-            f"Sync finished with {problems} error(s)" if problems else "Sync complete",
-            f"{self._server_label()}  ·  {counts}")
+            f"Sync finished with {problems} error(s)" if problems
+            else "Sync complete",
+            f"{self._server_label()}  ·  {counts}{runs}")
 
     def _notify_scheduled_blocked(self, cause: str, detail=None) -> None:
         """Say once that today's scheduled sync couldn't run.
@@ -416,6 +488,9 @@ class Automator:
         self._notifier.enabled = self.config.get_notifications()
 
     def stop(self):
+        # Whatever this burst moved is still worth saying; being stopped is not
+        # a reason to swallow it.
+        self.flush_notification()
         self._stop.set()
 
     def run(self, live_sync=None, scheduled_sync=None, scheduled_time=None,

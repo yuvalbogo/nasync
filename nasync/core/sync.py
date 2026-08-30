@@ -96,8 +96,8 @@ class Syncer:
         cancelled = False
         # "unsupported" only comes back from the push side; `.get(key, 0)`
         # below lets the pull side omit it without special-casing.
-        totals = {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0,
-                  "unsupported": 0}
+        totals = {"transferred": 0, "skipped": 0, "deleted": 0,
+                  "deleted_dirs": 0, "errors": 0, "unsupported": 0}
         try:
             # A dry run connects too. The comment here used to say a push
             # dry-run "only reads local disk", which was wrong in the case that
