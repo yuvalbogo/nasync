@@ -190,8 +190,7 @@ class NasyncWindow(Adw.ApplicationWindow):
         pairs_group.add(self._pairs_dropdown)
         page.add(pairs_group)
 
-        self._pair_groups[name] = {"group": pairs_group, "rows": []}
-        self.refresh_pairs(name)
+        self._pair_groups[name] = {"group": pairs_group, "dropdown": self._pairs_dropdown}
         return page
 
     def _build_automation_cards(self, server_name: str) -> Adw.PreferencesGroup:
@@ -259,7 +258,9 @@ class NasyncWindow(Adw.ApplicationWindow):
 
     def _build_pairs_list(self, server_name: str) -> Gtk.Widget:
         """Scrollable list of sync pairs for this server."""
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(8)
+        box.set_margin_bottom(8)
 
         pairs = self.config.get_pairs(server_name)
         if not pairs:
@@ -268,40 +269,25 @@ class NasyncWindow(Adw.ApplicationWindow):
             box.append(row)
         else:
             for pair in pairs:
-                pair_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-                pair_row.set_margin_start(12)
-                pair_row.set_margin_end(12)
-
-                label_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-                name_label = Gtk.Label(label=pair["name"])
-                name_label.set_halign(Gtk.Align.START)
-                path_label = Gtk.Label(
-                    label=f"{pair['local']}  →  {pair['server']}"
+                # Use an Adw.ActionRow for consistent styling and better visibility
+                pair_row = Adw.ActionRow(
+                    title=pair["name"],
+                    subtitle=f"{pair['local']}  →  {pair['server']}"
                 )
-                path_label.add_css_class("dim-label")
-                path_label.add_css_class("caption")
-                path_label.set_halign(Gtk.Align.START)
-                label_box.append(name_label)
-                label_box.append(path_label)
+                pair_row.set_subtitle_lines(1)
 
-                spacer = Gtk.Box()
-                spacer.set_hexpand(True)
-
-                edit_btn = _icon_button("document-edit-symbolic", "Edit",
-                                       self._on_edit_pair, pair["name"], server_name)
-                remove_btn = _icon_button("user-trash-symbolic", "Remove",
-                                         self._on_remove_pair, pair["name"], server_name)
-
-                pair_row.append(label_box)
-                pair_row.append(spacer)
-                pair_row.append(edit_btn)
-                pair_row.append(remove_btn)
+                # Add edit and remove buttons
+                pair_row.add_suffix(_icon_button("document-edit-symbolic", "Edit",
+                                                self._on_edit_pair, pair["name"], server_name))
+                pair_row.add_suffix(_icon_button("user-trash-symbolic", "Remove",
+                                                self._on_remove_pair, pair["name"], server_name))
                 box.append(pair_row)
 
         # Add button at bottom
         add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         add_row.set_margin_start(12)
         add_row.set_margin_top(6)
+        add_row.set_margin_bottom(6)
         add_btn = Gtk.Button(icon_name="list-add-symbolic")
         add_btn.set_tooltip_text("Add a sync pair")
         add_btn.add_css_class("flat")
@@ -312,8 +298,9 @@ class NasyncWindow(Adw.ApplicationWindow):
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_child(box)
-        scroll.set_max_content_height(300)
+        # Don't limit height - let the expander expand naturally
         scroll.set_propagate_natural_height(True)
+        scroll.set_propagate_natural_width(True)
         return scroll
 
     def _build_empty_page(self) -> Adw.StatusPage:
@@ -532,15 +519,15 @@ class NasyncWindow(Adw.ApplicationWindow):
             return
 
         group = entry["group"]
-        pairs = self.config.get_pairs(name)
 
         # Rebuild the pairs dropdown content
-        old_child = group.get_first_child()
-        if old_child:
-            group.remove(old_child)
+        old_dropdown = entry.get("dropdown")
+        if old_dropdown:
+            group.remove(old_dropdown)
 
         new_dropdown = self._build_pairs_dropdown_content(name)
         group.add(new_dropdown)
+        self._pair_groups[name]["dropdown"] = new_dropdown
 
     def _set_actions_sensitive(self, sensitive: bool) -> None:
         """Nothing to sync without a server, so don't offer to."""
