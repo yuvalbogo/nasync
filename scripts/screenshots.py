@@ -189,7 +189,10 @@ class App(Adw.Application):
 
     def do_activate(self):
         self.win = NasyncWindow(self)
-        self.win.set_default_size(980, 700)
+        # A little wider than the app's own default so paths don't ellipsize in
+        # a README image, but the same height, because the point of these
+        # pictures is what the window actually shows without scrolling.
+        self.win.set_default_size(900, 860)
         self.win.present()
         # One idle pass isn't enough: the window still has to allocate and the
         # first frame has to be drawn before the widget tree has any content.

@@ -57,6 +57,11 @@ class NasyncApplication(Adw.Application):
             storage.connect("activate", lambda *_: self._window.open_storage())
             self._window.add_action(storage)
 
+            readme = Gio.SimpleAction.new("readme", None)
+            readme.connect("activate", lambda *_: self._window.open_readme())
+            self._window.add_action(readme)
+            self.set_accels_for_action("win.readme", ["F1"])
+
         self._window.present()
 
     def _on_about(self, *_args) -> None:

@@ -2,6 +2,70 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.17.0] - 2026-08-30
+
+The desktop app rearranged around what it is actually for. NASync is
+configured once and then left alone, which means the settings are not
+incidental to the main screen — they are what you open the app to confirm. So
+they are now stated on the page, with their current values, instead of living
+behind the menu button next to the window controls.
+
+### Changed
+- **The sync mode, automatic syncing and notifications are on the main page**,
+  in a *How syncing works* group, each row showing its value: the mode reads
+  `Mirror` or `Update` with a subtitle saying what that mode does to server
+  files, and *Automatic syncing* reads `Live · daily 02:00`, `Paused` or `Off`
+  and expands in place to the full set of triggers. The setting that decides
+  whether a sync **deletes on the server** was previously two clicks into a
+  menu; nothing about an app you check on rather than operate justifies that.
+  The group says *"These apply to every server"*, because they do — they are
+  app-wide, and a group on a per-server tab would otherwise read as per-server.
+- **Sync pairs are visible without being expanded.** They were behind a
+  *Show all pairs* disclosure triangle, which put the one thing the screen
+  exists for one click further away than the settings above it. The add button
+  moved to the group header, where GNOME puts the action that adds to a list.
+- **The line above the Sync button says what Sync will do** — `Mirror · sends
+  3 folder(s) to 'attic-nas' · deletes server files you removed locally` —
+  rather than the bar carrying a button labelled with the mode's name. The
+  name never said what the mode meant; this does, next to the button it
+  applies to.
+- **Storage is two named views, Usage and Duplicates**, switched by a view
+  switcher in its header. One list used to become the other when *Find
+  duplicates* was pressed, with no labelled way back — leaving *Up one folder*
+  standing in for "leave duplicate results", which is not what it says.
+  **The duplicate scan is now explicit**: opening the tab reads nothing and
+  offers a *Scan for duplicates* button, matching `nasync duplicates` being a
+  command you run. Results are retired when you browse to another folder,
+  rather than sitting under a path they were not scanned in.
+- **The *Quick settings* card group is gone.** Of its three rows, one only
+  opened Settings and showed no state, one duplicated Settings, and one was
+  broken (below).
+- The sync mode is one implementation now, shared by the page and the Settings
+  dialog, rather than three separate hand-built widget trees. The two popovers
+  that carried the mode and the automation switches are removed with it; their
+  hand-drawn rows were reimplementations of `AdwActionRow` and `AdwSwitchRow`.
+
+### Fixed
+- **"Sync only on home network" silently turned on live sync.** Its handler
+  passed the whole automation dict as `set_automation`'s first positional
+  argument — which is `live_sync` — so a non-empty dict became `True` and the
+  unattended trigger switched on while the user believed they had adjusted a
+  network preference. The switch also always displayed *On*, because it read a
+  config key nothing ever wrote, and it claimed to control something that was
+  never optional: live sync is gated on being on the server's network
+  unconditionally, in `automation.py`. Removed rather than repaired — there
+  was no setting there to repair.
+- **The status line under the progress bar was invisible.** It was created
+  hidden and never shown, so everything written to it — the idle summary, the
+  final tally (`12 transferred · 3 unchanged`), the cancellation notice and
+  the error text — was discarded. It is now visible and carries all of it.
+- The tab badge no longer sets a "needs attention" dot from the same pair
+  count that the badge already displays.
+- The destination field's **Browse the server** button is now present and
+  disabled when the server has no address yet, with a tooltip saying so,
+  instead of vanishing and leaving two identical-looking fields where only one
+  offers to browse.
+
 ## [0.16.2] - 2026-08-08
 
 Documentation and packaging corrections found by reading the whole of README,

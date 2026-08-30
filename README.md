@@ -183,18 +183,21 @@ nasync sync --mode update    # (--no-delete is an alias for this)
 nasync sync --mode mirror
 ```
 
-In the desktop app it lives in the menu (⋯) → **Settings** → *Sync mode*, and
-the active mode is spelled out under **Transfer** so a run that deletes is
-never a surprise. A dry run (`nasync sync --dry-run`, or **Dry run** in the
-app) lists exactly what would be deleted before anything happens.
+In the desktop app it's a row on the main page, under **How syncing works** —
+`Mirror` or `Update`, with a line underneath saying what that mode does to
+files on the server. The line above the **Sync** button then spells out the
+run itself (*Mirror · sends 3 folder(s) to 'attic-nas' · deletes server files
+you removed locally*), so a run that deletes is never a surprise. A dry run
+(`nasync sync --dry-run`, or **Dry run** in the app) lists exactly what would
+be deleted before anything happens.
 
 ## Automatic syncing
 
 Two independent triggers, **both off by default**. Each uses the sync mode
-above. In the desktop app they're on the main page: the **Automatic** button
-next to the mode button reports the current state and opens a popover to
-change it. The same settings are also in menu (⋯) → **Settings** →
-*Automatic*.
+above. In the desktop app they're on the main page, under **How syncing
+works**: the *Automatic syncing* row reports the current state — `Live · daily
+02:00`, `Paused`, or `Off` — and expands to the switches that change it. The
+same settings are also in menu (⋯) → **Settings** → *Automatic*.
 
 ### Live sync
 
@@ -343,13 +346,15 @@ nasync gui
 ![The NASync main window](screenshots/gui-main.png)
 
 Servers are tabs, each owning its own sync pairs, so a tab is the whole context
-for a sync. The mode and automatic-syncing buttons above the action bar report
-their current state rather than hiding it behind a menu.
+for a sync. Reading down: which NAS, which folders, then how syncing works —
+the settings state their current value on the page rather than hiding it
+behind a menu, because this is an app you configure once and afterwards open
+to check on.
 
 | | |
 |:--|:--|
 | ![Storage](screenshots/gui-storage.png) | ![Settings](screenshots/gui-settings.png) |
-| **Storage** — what's using space, biggest first, with drill-down | **Settings** — sync mode, and how your passwords are stored |
+| **Storage** — what's using space, biggest first, with drill-down | **Settings** — the same settings in full, plus how your passwords are stored |
 
 It's a front-end over the same engine as the CLI:
 
@@ -357,17 +362,22 @@ It's a front-end over the same engine as the CLI:
   tab holds only that server's sync pairs. The tab badge counts them. Add or
   edit a server in a dialog that can test the connection and fill the share
   list from the server itself.
-- **Sync pairs** — local→server mappings, with a real folder picker
-- **Mode and Automatic buttons** on the main page, each showing the current
-  state — `Mirror`, `Live · daily 02:00`, `Paused` — and opening a popover
-  that changes it. What a sync deletes and whether one happens by itself are
-  the two things worth seeing without going looking.
+- **Sync pairs** — local→server mappings, listed on the page with a real
+  folder picker behind the **+** beside the group's title
+- **How syncing works** — the sync mode, automatic syncing and notifications,
+  each row showing its current value: `Mirror` with a line saying what mirror
+  does to server files, and `Live · daily 02:00` / `Paused` / `Off` on a row
+  that expands to the triggers behind it. What a sync deletes and whether one
+  happens by itself are the two things worth seeing without going looking.
+  These are app-wide, which the group says, and Settings holds the same
+  controls in full.
 - **Sync / Dry run / Restore** pinned to the bottom, with **Cancel** at the
   far end of the same row, and the transfer state directly beneath them
 - **Progress for the pair being synced**, with the state (Idle, Syncing…,
   Complete) centred above the bar and the detail — which pair, which file,
   bytes, elapsed — below it. The bar accounts for progress *within* the
-  current file, so one large file still moves it.
+  current file, so one large file still moves it. The last line says what the
+  run will do before you start it, and what it did once finished.
 - Files that fail individually are counted and listed under **Show errors**,
   rather than disappearing into a success message
 - **Notifications for syncs you aren't watching** — switch away mid-transfer
@@ -622,7 +632,7 @@ nasync duplicates         # files stored more than once
 
 Each folder is ranked by everything **beneath** it, so a big file three levels
 down is attributed to the folder you'd actually delete. In the desktop app it's
-**Storage** in the menu.
+**Storage** in the menu, which opens on its **Usage** view.
 
 This costs a scan and nothing more — it reuses the same index the sync engine
 builds, which reads one directory per round trip.
@@ -646,6 +656,12 @@ nasync duplicates --min-size 100000  # default floor is 1 MB
 Files that share a size but differ in content are split apart by `--verify`
 rather than reported together — listing them as duplicates would invite you to
 delete a file that isn't a copy of anything.
+
+In the desktop app this is the **Duplicates** view in **Storage**, beside
+*Usage*. Opening it reads nothing: grouping by size still means walking the
+share, so it waits for **Scan for duplicates** rather than starting one
+because you looked at a tab. Browsing to another folder retires the results,
+which belong to the folder they were scanned in.
 
 > **NASync never deletes anything here.** Every one of these commands is
 > read-only; removing copies is your call, made with your own tools.

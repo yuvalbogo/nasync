@@ -11,7 +11,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from nasync.core.samba import SAMBAClient  # noqa: E402
 from nasync.format import format_bytes, format_volume  # noqa: E402
@@ -34,7 +34,7 @@ SYNC_MODE_CHOICES = (
 
 #: The automatic-syncing switches, in display order: attribute name, title, and
 #: the sentence explaining it. Both surfaces that offer these read from here, so
-#: a switch can't be called one thing in the popover and another in Settings.
+#: a switch can't be called one thing on the page and another in Settings.
 AUTOMATION_ROWS = (
     ("live", "Live sync",
      "Syncs a few seconds after a file changes. Runs only while this machine "
@@ -63,12 +63,19 @@ _SERVICE_IDLE = "Starts when you turn on live or scheduled sync."
 class AutomationSettings:
     """The automatic-syncing settings, minus any particular widget.
 
-    Two surfaces offer these — the Settings dialog and the main window's
-    popover — and both need the same three things: write the change, reconcile
-    the background service off the UI thread, and say what the service is doing
-    now. Keeping that here is what stops the two from drifting apart, which is
-    otherwise inevitable for a panel that exists twice.
+    Two surfaces offer these — the Settings dialog and the main page's
+    Automatic expander — and both need the same three things: write the change,
+    reconcile the background service off the UI thread, and say what the service
+    is doing now. Keeping that here is what stops the two from drifting apart,
+    which is otherwise inevitable for a panel that exists twice.
     """
+
+    #: How long the time field sits still before the change is committed.
+    #: Committing writes the config *and* reconciles the systemd unit, which
+    #: costs three `systemctl` subprocesses — spinning the minutes from :00 to
+    #: :30 must not do that thirty times over. Long enough to swallow a scroll,
+    #: short enough that nobody notices waiting for it.
+    TIME_COMMIT_DELAY_MS = 700
 
     def __init__(self, config, on_changed=None, on_detail=None):
         self._config = config
@@ -76,6 +83,8 @@ class AutomationSettings:
         # Called with the service's one-line status whenever it might have
         # changed; each surface renders it in whatever widget it keeps for it.
         self._on_detail = on_detail
+        self._time_commit = None       # pending debounce timeout, if any
+        self._pending_time = None
 
     @property
     def config(self):
@@ -95,11 +104,34 @@ class AutomationSettings:
         self._write(background=value)
 
     def set_time(self, value: str) -> None:
-        self._config.set_automation(scheduled_time=value)
-        self._changed("automation")
+        """Remember the new time; commit once the spinning stops.
+
+        Every step of a spin button emits, and a commit is a file write plus a
+        service reconcile, so writing on each one made scrolling the minutes
+        stutter under a queue of subprocesses and toasts. The value shown is
+        always the user's; only the saving waits.
+        """
+        self._pending_time = value
+        if self._time_commit is not None:
+            GLib.source_remove(self._time_commit)
+        self._time_commit = GLib.timeout_add(self.TIME_COMMIT_DELAY_MS,
+                                             self._commit_time)
+
+    @property
+    def scheduled_time(self) -> str:
+        """The time to *display* — the user's choice, saved or still pending."""
+        return self._pending_time or self.get()["scheduled_time"]
+
+    def _commit_time(self) -> bool:
+        self._time_commit = None
+        self._config.set_automation(scheduled_time=self._pending_time)
+        self._pending_time = None
         # Only worth reconciling the service if it's actually scheduling.
         if self.get()["scheduled_sync"]:
-            self.reconcile()
+            self.reconcile()          # reports the change when it lands
+        else:
+            self._changed("automation")
+        return False                  # one-shot; do not repeat
 
     def set_notifications(self, value: bool) -> None:
         self._config.set_notifications(value)
@@ -181,12 +213,223 @@ def make_time_spin(low, high, step, value, on_changed) -> Gtk.SpinButton:
     return spin
 
 
+#: The mode explanations keyed by mode, for surfaces that show the chosen one
+#: rather than both side by side.
+SYNC_MODE_SUBTITLE = {mode: subtitle for mode, _, subtitle in SYNC_MODE_CHOICES}
+
+
+def switch_row(key: str, active: bool, handler) -> Adw.SwitchRow:
+    """One switch row, titled and explained from `AUTOMATION_ROWS`."""
+    row = Adw.SwitchRow(title=AUTOMATION_TITLE[key],
+                        subtitle=AUTOMATION_SUBTITLE[key])
+    row.set_subtitle_lines(0)      # 0 = no limit; these must not ellipsize
+    row.set_active(active)
+    row.connect("notify::active", handler)
+    return row
+
+
+class SyncModeRow(Adw.ComboRow):
+    """The sync mode as a value row: the mode, and what that mode does.
+
+    A combo rather than a pair of radio rows because both surfaces carrying it
+    want the current mode readable without opening anything — this is the
+    setting that decides whether a sync deletes on the server, so it has to be
+    legible at rest. The subtitle then states the consequence of whichever mode
+    is selected, which is what a bare label reading "Mirror" never did.
+    """
+
+    def __init__(self, config, on_changed=None):
+        super().__init__(title="Sync mode")
+        self._config = config
+        self._on_changed = on_changed
+        self._modes = [mode for mode, _, _ in SYNC_MODE_CHOICES]
+
+        self.set_model(Gtk.StringList.new(
+            [title for _, title, _ in SYNC_MODE_CHOICES]))
+        self.set_subtitle_lines(0)
+        self.add_prefix(Gtk.Image(icon_name="edit-copy-symbolic"))
+        self.reload()
+        self.connect("notify::selected", self._on_selected)
+
+    def reload(self) -> None:
+        """Re-read the mode; the other surface may have changed it."""
+        mode = self._config.get_sync_mode()
+        if mode in self._modes:
+            self.set_selected(self._modes.index(mode))
+        self._show_consequence()
+
+    def _show_consequence(self) -> None:
+        self.set_subtitle(SYNC_MODE_SUBTITLE[self._modes[self.get_selected()]])
+
+    def _on_selected(self, *_args) -> None:
+        mode = self._modes[self.get_selected()]
+        self._show_consequence()
+        # Selecting the mode that is already set happens on every reload().
+        if mode == self._config.get_sync_mode():
+            return
+        self._config.set_sync_mode(mode)
+        if self._on_changed:
+            self._on_changed(mode)
+
+
+class AutomationRows:
+    """The automatic-syncing controls, built once and mounted anywhere.
+
+    Two surfaces show these — the main page's expander and the Settings dialog
+    — and a switch that means one thing in one place and another elsewhere is
+    the failure worth designing out. Both mount these same row objects, so
+    there is one implementation and nothing to drift.
+
+    Not a widget itself: the caller decides whether the rows go into a group or
+    an expander.
+    """
+
+    def __init__(self, config, on_changed=None, on_summary=None):
+        self._on_summary = on_summary
+        # Set while reload() writes the config's values into the switches, so
+        # that echoing what we just read doesn't get written straight back.
+        self._loading = False
+        self.settings = AutomationSettings(
+            config, on_changed=on_changed,
+            on_detail=self._set_service_detail)
+
+        automation = self.settings.get()
+        self.live = switch_row("live", automation["live_sync"], self._on_live)
+        self.scheduled = switch_row("scheduled", automation["scheduled_sync"],
+                                    self._on_scheduled)
+        self.time = self._build_time_row(automation["scheduled_time"])
+        self.background = switch_row("background", automation["background"],
+                                     self._on_background)
+        self.notifications = switch_row("notifications",
+                                        config.get_notifications(),
+                                        self._on_notifications)
+
+        #: In display order. Notifications is kept out: it is about being told
+        #: what happened, not about when a sync runs.
+        self.rows = (self.live, self.scheduled, self.time, self.background)
+        self.refresh()
+
+    def _build_time_row(self, value: str) -> Adw.ActionRow:
+        """HH:MM as two spin buttons — the same shape GNOME Clocks uses."""
+        row = Adw.ActionRow(title="Time", subtitle="24-hour clock")
+        hour, minute = (int(part) for part in value.split(":"))
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.set_valign(Gtk.Align.CENTER)
+
+        self._hour_spin = make_time_spin(0, 23, 1, hour, self._on_time)
+        box.append(self._hour_spin)
+
+        colon = Gtk.Label(label=":")
+        colon.add_css_class("heading")
+        box.append(colon)
+
+        self._minute_spin = make_time_spin(0, 59, 5, minute, self._on_time)
+        box.append(self._minute_spin)
+
+        row.add_suffix(box)
+        return row
+
+    def summary(self) -> str:
+        """The one-line state for a collapsed row: what runs, and when.
+
+        `Paused` is its own answer rather than being folded into `Off`: the
+        triggers are configured and deliberately not running, which used to be
+        invisible and read as "it's syncing".
+        """
+        automation = self.settings.get()
+        live, scheduled = automation["live_sync"], automation["scheduled_sync"]
+        if not (live or scheduled):
+            return "Off"
+        if not automation["background"]:
+            return "Paused"
+        parts = []
+        if live:
+            parts.append("Live")
+        if scheduled:
+            # The pending value, so the summary tracks the spinner rather than
+            # trailing the debounced save by a beat.
+            parts.append(f"daily {self.settings.scheduled_time}")
+        return " · ".join(parts)
+
+    def refresh(self) -> None:
+        """Time only matters when scheduling; the service only when either is on."""
+        automation = self.settings.get()
+        self.time.set_sensitive(automation["scheduled_sync"])
+        detail, available = self.settings.service_state(automation)
+        self.background.set_sensitive(available)
+        self.background.set_subtitle(detail)
+        self._publish_summary()
+
+    def reload(self) -> None:
+        """Re-read every control from the config.
+
+        These settings are app-wide and shown in more than one place, so the
+        surface that did *not* make a change still has to end up showing it.
+        """
+        automation = self.settings.get()
+        self._loading = True
+        try:
+            self.live.set_active(automation["live_sync"])
+            self.scheduled.set_active(automation["scheduled_sync"])
+            self.background.set_active(automation["background"])
+            self.notifications.set_active(
+                self.settings.config.get_notifications())
+            hour, minute = (int(part)
+                            for part in self.settings.scheduled_time.split(":"))
+            self._hour_spin.set_value(hour)
+            self._minute_spin.set_value(minute)
+        finally:
+            self._loading = False
+        self.refresh()
+
+    def _publish_summary(self) -> None:
+        if self._on_summary:
+            self._on_summary(self.summary())
+
+    def _set_service_detail(self, detail: str) -> None:
+        self.background.set_subtitle(detail)
+        self._publish_summary()
+
+    def _on_live(self, row, _param) -> None:
+        if self._loading:
+            return
+        self.settings.set_live(row.get_active())
+        self.refresh()
+
+    def _on_scheduled(self, row, _param) -> None:
+        if self._loading:
+            return
+        self.settings.set_scheduled(row.get_active())
+        self.refresh()
+
+    def _on_background(self, row, _param) -> None:
+        if self._loading:
+            return
+        self.settings.set_background(row.get_active())
+        self.refresh()
+
+    def _on_notifications(self, row, _param) -> None:
+        if self._loading:
+            return
+        self.settings.set_notifications(row.get_active())
+
+    def _on_time(self, _spin) -> None:
+        if self._loading:
+            return
+        self.settings.set_time(
+            f"{int(self._hour_spin.get_value()):02d}:"
+            f"{int(self._minute_spin.get_value()):02d}")
+        self._publish_summary()
+
+
 class SettingsDialog(Adw.PreferencesDialog):
     """App settings in full: the sync mode, automatic syncing, notifications.
 
-    The main window carries the same automation and mode settings in popovers,
-    for the common case of changing them mid-task; this is where they live
-    with room for the explanations.
+    The main page carries the same mode and automation rows — the same row
+    objects, from `SyncModeRow` and `AutomationRows` — for reading at a glance.
+    This is where they live with room around them, alongside the credential
+    security summary the page does not carry.
 
     Instant-apply, as the GNOME HIG expects of a preferences window: there is
     no Save button, a change writes to the config straight away and calls
@@ -197,9 +440,8 @@ class SettingsDialog(Adw.PreferencesDialog):
         super().__init__()
         self._config = config
         self._on_changed = on_changed
-        self._automation = AutomationSettings(
-            config, on_changed=self._changed,
-            on_detail=lambda detail: self._service_row.set_subtitle(detail))
+        self._rows = AutomationRows(config, on_changed=self._changed)
+        self._automation = self._rows.settings
 
         self.set_title("Settings")
         # Two pages rather than one long scroll: what a sync does is a
@@ -207,31 +449,13 @@ class SettingsDialog(Adw.PreferencesDialog):
         page = Adw.PreferencesPage(title="Syncing", name="syncing",
                                    icon_name="folder-remote-symbolic")
 
+        # Untitled: the row inside is already called "Sync mode", and a group
+        # heading repeating its only row's title is noise.
         group = Adw.PreferencesGroup(
-            title="Sync mode",
             description="What a sync does with files that are on the server but "
                         "not in your local folder.",
         )
-        current = config.get_sync_mode()
-        self._buttons = {}
-        leader = None
-        for mode, title, subtitle in SYNC_MODE_CHOICES:
-            row = Adw.ActionRow(title=title, subtitle=subtitle)
-            row.set_subtitle_lines(0)      # 0 = no limit; these must not ellipsize
-
-            check = Gtk.CheckButton()
-            if leader is None:
-                leader = check
-            else:
-                check.set_group(leader)
-            check.set_active(mode == current)
-            check.set_valign(Gtk.Align.CENTER)
-            check.connect("toggled", self._on_mode_toggled, mode)
-            row.add_prefix(check)
-            row.set_activatable_widget(check)
-
-            self._buttons[mode] = check
-            group.add(row)
+        group.add(SyncModeRow(config, on_changed=self._changed))
         page.add(group)
 
         # The setting reads as symmetric but isn't, so say so here rather than
@@ -341,10 +565,7 @@ class SettingsDialog(Adw.PreferencesDialog):
         """A background sync is only trustworthy if it says what it did."""
         group = Adw.PreferencesGroup(title="Notifications")
 
-        self._notify_row = self._switch_row("notifications",
-                                            self._config.get_notifications(),
-                                            self._on_notifications_toggled)
-        group.add(self._notify_row)
+        group.add(self._rows.notifications)
 
         # A switch that's on while nothing can ever appear is a lie; say so
         # rather than letting someone conclude syncing itself is broken.
@@ -360,345 +581,19 @@ class SettingsDialog(Adw.PreferencesDialog):
             group.add(warning)
         return group
 
-    def _on_notifications_toggled(self, row, _param) -> None:
-        self._automation.set_notifications(row.get_active())
-
-    # ------------------------------------------------------------------ #
-    # Automatic syncing
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _switch_row(key: str, active: bool, handler) -> Adw.SwitchRow:
-        """One switch row, titled and explained from `AUTOMATION_ROWS`."""
-        row = Adw.SwitchRow(title=AUTOMATION_TITLE[key],
-                            subtitle=AUTOMATION_SUBTITLE[key])
-        row.set_subtitle_lines(0)      # 0 = no limit; these must not ellipsize
-        row.set_active(active)
-        row.connect("notify::active", handler)
-        return row
-
     def _build_automation_group(self) -> Adw.PreferencesGroup:
-        automation = self._automation.get()
         group = Adw.PreferencesGroup(
             title="Automatic syncing",
             description="Off until you turn them on. Both sync using the mode "
                         "set on the Syncing page.",
         )
-
-        self._live_row = self._switch_row("live", automation["live_sync"],
-                                          self._on_live_toggled)
-        group.add(self._live_row)
-
-        self._scheduled_row = self._switch_row("scheduled",
-                                               automation["scheduled_sync"],
-                                               self._on_scheduled_toggled)
-        group.add(self._scheduled_row)
-
-        self._time_row = self._build_time_row(automation["scheduled_time"])
-        group.add(self._time_row)
-
-        # What the two switches above actually depend on. Turning this off
-        # keeps them configured but stops anything from acting on them.
-        self._service_row = self._switch_row("background", automation["background"],
-                                             self._on_background_toggled)
-        group.add(self._service_row)
-
-        self._refresh_automation_rows()
+        for row in self._rows.rows:
+            group.add(row)
         return group
 
-    def _build_time_row(self, value: str) -> Adw.ActionRow:
-        """HH:MM as two spin buttons — the same shape GNOME Clocks uses."""
-        row = Adw.ActionRow(title="Time", subtitle="24-hour clock")
-        hour, minute = (int(part) for part in value.split(":"))
-
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        box.set_valign(Gtk.Align.CENTER)
-
-        self._hour_spin = make_time_spin(0, 23, 1, hour, self._on_time_changed)
-        box.append(self._hour_spin)
-
-        colon = Gtk.Label(label=":")
-        colon.add_css_class("heading")
-        box.append(colon)
-
-        self._minute_spin = make_time_spin(0, 59, 5, minute, self._on_time_changed)
-        box.append(self._minute_spin)
-
-        row.add_suffix(box)
-        return row
-
-    def _refresh_automation_rows(self) -> None:
-        """Time only matters when scheduling; the service only when either is on."""
-        automation = self._automation.get()
-        self._time_row.set_sensitive(automation["scheduled_sync"])
-        detail, available = self._automation.service_state(automation)
-        self._service_row.set_sensitive(available)
-        self._service_row.set_subtitle(detail)
-
-    def _on_live_toggled(self, row, _param) -> None:
-        self._automation.set_live(row.get_active())
-        self._refresh_automation_rows()
-
-    def _on_scheduled_toggled(self, row, _param) -> None:
-        self._automation.set_scheduled(row.get_active())
-        self._refresh_automation_rows()
-
-    def _on_background_toggled(self, row, _param) -> None:
-        self._automation.set_background(row.get_active())
-        self._refresh_automation_rows()
-
-    def _on_time_changed(self, _spin) -> None:
-        self._automation.set_time(
-            f"{int(self._hour_spin.get_value()):02d}:"
-            f"{int(self._minute_spin.get_value()):02d}")
-
-    def _on_mode_toggled(self, check, mode) -> None:
-        # Radio buttons emit for the one being switched off too.
-        if not check.get_active():
-            return
-        self._config.set_sync_mode(mode)
-        self._changed(mode)
-
     def _changed(self, what: str) -> None:
         if self._on_changed:
             self._on_changed(what)
-
-
-class _StatePopover(Gtk.Popover):
-    """Base for the popovers hanging off the main window's state buttons.
-
-    Both of them show settings that another surface (the Settings dialog, or a
-    `nasync` command) can change underneath them, so neither keeps state of its
-    own: opening one reloads it from the config. `_loading` stops that reload
-    from being mistaken for the user flipping every switch it touches.
-    """
-
-    WIDTH = 340
-
-    def __init__(self, config, on_changed=None):
-        super().__init__()
-        self._config = config
-        self._on_changed = on_changed
-        self._loading = False
-        self.connect("show", lambda *_: self.reload())
-
-    def _content_box(self) -> Gtk.Box:
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        for setter in ("set_margin_top", "set_margin_bottom",
-                       "set_margin_start", "set_margin_end"):
-            getattr(box, setter)(12)
-        box.set_size_request(self.WIDTH, -1)
-        return box
-
-    @staticmethod
-    def _heading(text: str) -> Gtk.Label:
-        label = Gtk.Label(label=text, xalign=0)
-        label.add_css_class("heading")
-        return label
-
-    @staticmethod
-    def _caption(text: str, indent: int = 0) -> Gtk.Label:
-        label = Gtk.Label(label=text, xalign=0)
-        label.add_css_class("dim-label")
-        label.add_css_class("caption")
-        label.set_wrap(True)
-        label.set_margin_start(indent)
-        return label
-
-    def _switch_row(self, key, handler):
-        """A title, its explanation, and a switch — titled from `AUTOMATION_ROWS`."""
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        text.set_hexpand(True)
-        text.append(Gtk.Label(label=AUTOMATION_TITLE[key], xalign=0))
-        text.append(self._caption(AUTOMATION_SUBTITLE[key]))
-        row.append(text)
-
-        switch = Gtk.Switch()
-        switch.set_valign(Gtk.Align.CENTER)
-        switch.connect("notify::active", handler)
-        row.append(switch)
-        return row, switch
-
-    def reload(self) -> None:
-        raise NotImplementedError
-
-    def _changed(self, what: str) -> None:
-        if self._on_changed:
-            self._on_changed(what)
-
-
-class ModePopover(_StatePopover):
-    """The sync mode, attached to the button that reports it.
-
-    Mirror mode deletes on the server, which is too consequential to live two
-    clicks away in a menu — the button says which mode is armed and this opens
-    from it.
-    """
-
-    def __init__(self, config, on_changed=None):
-        super().__init__(config, on_changed)
-
-        box = self._content_box()
-        box.append(self._heading("Sync mode"))
-        box.append(self._caption("What a sync does with files that are on the "
-                                 "server but not in your local folder."))
-
-        self._checks = {}
-        leader = None
-        for mode, title, subtitle in SYNC_MODE_CHOICES:
-            group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            check = Gtk.CheckButton(label=title)
-            if leader is None:
-                leader = check
-            else:
-                check.set_group(leader)
-            check.connect("toggled", self._on_toggled, mode)
-            group.append(check)
-            # Indented under its own choice, so it reads as that option's
-            # consequence rather than a note about both.
-            group.append(self._caption(subtitle, indent=28))
-            box.append(group)
-            self._checks[mode] = check
-
-        box.append(Gtk.Separator())
-        box.append(self._caption("Restore is unaffected — pulling from the "
-                                 "server never deletes local files."))
-        self.set_child(box)
-        self.reload()
-
-    def reload(self) -> None:
-        self._loading = True
-        try:
-            current = self._config.get_sync_mode()
-            for mode, check in self._checks.items():
-                check.set_active(mode == current)
-        finally:
-            self._loading = False
-
-    def _on_toggled(self, check, mode) -> None:
-        # Radio buttons emit for the one being switched off too.
-        if self._loading or not check.get_active():
-            return
-        self._config.set_sync_mode(mode)
-        self._changed(mode)
-
-
-class AutomaticPopover(_StatePopover):
-    """Automatic syncing, on the page it affects rather than behind a menu.
-
-    Everything here is instant-apply, and each change reconciles the background
-    service, exactly as the Settings dialog does — this is a second door onto
-    the same settings, not a second copy of them.
-    """
-
-    def __init__(self, config, on_changed=None):
-        super().__init__(config, on_changed)
-        self._automation = AutomationSettings(
-            config, on_changed=self._changed,
-            on_detail=lambda detail: self._service_label.set_label(detail))
-
-        box = self._content_box()
-        box.append(self._heading("Automatic syncing"))
-
-        live, self._live_switch = self._switch_row(
-            "live", self._on_live_toggled)
-        box.append(live)
-
-        scheduled, self._scheduled_switch = self._switch_row(
-            "scheduled", self._on_scheduled_toggled)
-        box.append(scheduled)
-
-        self._time_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        time_label = Gtk.Label(label="Time", xalign=0)
-        time_label.set_hexpand(True)
-        self._time_row.append(time_label)
-        self._hour_spin = make_time_spin(0, 23, 1, 2, self._on_time_changed)
-        self._time_row.append(self._hour_spin)
-        colon = Gtk.Label(label=":")
-        colon.add_css_class("heading")
-        self._time_row.append(colon)
-        self._minute_spin = make_time_spin(0, 59, 5, 0, self._on_time_changed)
-        self._time_row.append(self._minute_spin)
-        box.append(self._time_row)
-
-        box.append(Gtk.Separator())
-
-        background, self._background_switch = self._switch_row(
-            "background", self._on_background_toggled)
-        box.append(background)
-        self._service_label = self._caption("")
-        box.append(self._service_label)
-
-        notifications, self._notify_switch = self._switch_row(
-            "notifications", self._on_notifications_toggled)
-        box.append(notifications)
-
-        box.append(Gtk.Separator())
-        settings = Gtk.Button(label="All settings…")
-        settings.add_css_class("flat")
-        settings.connect("clicked", self._on_settings_clicked)
-        box.append(settings)
-
-        self.set_child(box)
-        self.reload()
-
-    def reload(self) -> None:
-        self._loading = True
-        try:
-            automation = self._automation.get()
-            self._live_switch.set_active(automation["live_sync"])
-            self._scheduled_switch.set_active(automation["scheduled_sync"])
-            self._background_switch.set_active(automation["background"])
-            self._notify_switch.set_active(self._config.get_notifications())
-            hour, minute = (int(p) for p in automation["scheduled_time"].split(":"))
-            self._hour_spin.set_value(hour)
-            self._minute_spin.set_value(minute)
-            self._refresh_rows(automation)
-        finally:
-            self._loading = False
-
-    def _refresh_rows(self, automation=None) -> None:
-        """Time only matters when scheduling; say what the service is doing."""
-        automation = automation or self._automation.get()
-        self._time_row.set_sensitive(automation["scheduled_sync"])
-        detail, available = self._automation.service_state(automation)
-        self._background_switch.set_sensitive(available)
-        self._service_label.set_label(detail)
-
-    def _on_live_toggled(self, switch, _param) -> None:
-        if self._loading:
-            return
-        self._automation.set_live(switch.get_active())
-        self._refresh_rows()
-
-    def _on_scheduled_toggled(self, switch, _param) -> None:
-        if self._loading:
-            return
-        self._automation.set_scheduled(switch.get_active())
-        self._refresh_rows()
-
-    def _on_background_toggled(self, switch, _param) -> None:
-        if self._loading:
-            return
-        self._automation.set_background(switch.get_active())
-        self._refresh_rows()
-
-    def _on_notifications_toggled(self, switch, _param) -> None:
-        if self._loading:
-            return
-        self._automation.set_notifications(switch.get_active())
-
-    def _on_time_changed(self, _spin) -> None:
-        if self._loading:
-            return
-        self._automation.set_time(
-            f"{int(self._hour_spin.get_value()):02d}:"
-            f"{int(self._minute_spin.get_value()):02d}")
-
-    def _on_settings_clicked(self, _button) -> None:
-        self.popdown()
-        self._changed("open-settings")
 
 
 class ServerDialog(Adw.Dialog):
@@ -1261,11 +1156,33 @@ class StorageDialog(Adw.Dialog):
         self._up.connect("clicked", self._on_up_clicked)
         header.pack_start(self._up)
 
-        self._duplicates_button = Gtk.Button(label="Find duplicates")
-        self._duplicates_button.connect("clicked", self._on_duplicates_clicked)
-        header.pack_end(self._duplicates_button)
+        # Two named views rather than one list that quietly becomes another.
+        # Which question you are asking is now something you choose and can
+        # see, and coming back from duplicates is a labelled tab rather than
+        # the "up one folder" button standing in for one.
+        self._views = Adw.ViewStack()
+        self._views.add_titled(self._build_usage_view(), "usage", "Usage")
+        self._views.add_titled(self._build_duplicates_view(), "duplicates",
+                               "Duplicates")
+        self._views.connect("notify::visible-child-name", self._on_view_changed)
+        header.set_title_widget(
+            Adw.ViewSwitcher(stack=self._views,
+                             policy=Adw.ViewSwitcherPolicy.WIDE))
         toolbar.add_top_bar(header)
 
+        self._banner = Adw.Banner()
+        self._banner.set_revealed(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(self._banner)
+        box.append(self._views)
+        toolbar.set_content(box)
+        self.set_child(toolbar)
+
+        self._load()
+
+    def _build_usage_view(self) -> Gtk.Widget:
+        """Folder sizes, biggest first, with drill-down."""
         self._summary = Adw.ActionRow()
         self._summary.set_activatable(False)
         self._summary.add_prefix(Gtk.Image(icon_name="drive-harddisk-symbolic"))
@@ -1275,17 +1192,14 @@ class StorageDialog(Adw.Dialog):
         summary_group.set_margin_end(12)
         summary_group.set_margin_top(12)
 
-        self._list = Gtk.ListBox()
-        self._list.set_selection_mode(Gtk.SelectionMode.NONE)
-        self._list.add_css_class("boxed-list")
-        self._list.set_margin_start(12)
-        self._list.set_margin_end(12)
-        self._list.set_margin_top(12)
-        self._list.set_margin_bottom(12)
-
+        self._list = self._boxed_list()
         scroller = Gtk.ScrolledWindow()
         scroller.set_vexpand(True)
         scroller.set_child(self._list)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content.append(summary_group)
+        content.append(scroller)
 
         self._status = Adw.StatusPage(title="Scanning the server…",
                                       description="Reading one folder at a time.")
@@ -1293,20 +1207,82 @@ class StorageDialog(Adw.Dialog):
                                            height_request=32))
 
         self._stack = Gtk.Stack()
-        self._stack.add_named(scroller, "list")
+        self._stack.add_named(content, "list")
         self._stack.add_named(self._status, "scanning")
+        return self._stack
 
-        self._banner = Adw.Banner()
+    def _build_duplicates_view(self) -> Gtk.Widget:
+        """Files stored more than once — scanned only when asked.
+
+        Opening this tab reads nothing. Grouping by size needs a walk of the
+        share, and a tab click is not consent to start one on a NAS with a
+        hundred thousand files on it; `nasync duplicates` is a command you run,
+        and so is this.
+        """
+        intro = Adw.StatusPage(
+            icon_name="edit-copy-symbolic",
+            title="Find duplicate files",
+            description="Groups files stored more than once, matched by size. "
+                        "This reads the share, so it costs a scan — nothing is "
+                        "read until you ask.",
+        )
+        scan = Gtk.Button(label="Scan for duplicates")
+        scan.add_css_class("pill")
+        scan.add_css_class("suggested-action")
+        scan.set_halign(Gtk.Align.CENTER)
+        scan.connect("clicked", self._on_scan_duplicates)
+        intro.set_child(scan)
+
+        self._dup_summary = Adw.ActionRow()
+        self._dup_summary.set_activatable(False)
+        self._dup_summary.add_prefix(Gtk.Image(icon_name="edit-copy-symbolic"))
+        again = Gtk.Button(label="Scan again")
+        again.set_valign(Gtk.Align.CENTER)
+        again.connect("clicked", self._on_scan_duplicates)
+        self._dup_summary.add_suffix(again)
+        dup_group = Adw.PreferencesGroup()
+        dup_group.add(self._dup_summary)
+        dup_group.set_margin_start(12)
+        dup_group.set_margin_end(12)
+        dup_group.set_margin_top(12)
+
+        self._dup_list = self._boxed_list()
+        dup_scroller = Gtk.ScrolledWindow()
+        dup_scroller.set_vexpand(True)
+        dup_scroller.set_child(self._dup_list)
+
+        results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        results.append(dup_group)
+        results.append(dup_scroller)
+
+        self._dup_status = Adw.StatusPage(
+            title="Looking for duplicates…",
+            description="Reading one folder at a time.")
+        self._dup_status.set_child(Gtk.Spinner(spinning=True, width_request=32,
+                                               height_request=32))
+
+        self._dup_stack = Gtk.Stack()
+        self._dup_stack.add_named(intro, "intro")
+        self._dup_stack.add_named(self._dup_status, "scanning")
+        self._dup_stack.add_named(results, "results")
+        return self._dup_stack
+
+    @staticmethod
+    def _boxed_list() -> Gtk.ListBox:
+        listbox = Gtk.ListBox()
+        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        listbox.add_css_class("boxed-list")
+        listbox.set_margin_start(12)
+        listbox.set_margin_end(12)
+        listbox.set_margin_top(12)
+        listbox.set_margin_bottom(12)
+        return listbox
+
+    def _on_view_changed(self, *_args) -> None:
+        """Up one folder means nothing in a flat list of duplicate groups."""
+        usage = self._views.get_visible_child_name() == "usage"
+        self._up.set_visible(usage)
         self._banner.set_revealed(False)
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.append(self._banner)
-        box.append(summary_group)
-        box.append(self._stack)
-        toolbar.set_content(box)
-        self.set_child(toolbar)
-
-        self._load()
 
     def _client(self):
         return SAMBAClient(self._server["ip"], self._server["username"],
@@ -1324,9 +1300,12 @@ class StorageDialog(Adw.Dialog):
         the dialog the same way."""
         self._banner.set_revealed(False)
         self._stack.set_visible_child_name("scanning")
-        self._status.set_title("Scanning the server…")
-        self._duplicates_button.set_sensitive(True)
         self._up.set_sensitive(bool(self._path))
+        # Duplicate results belong to the folder they were scanned in, so
+        # moving somewhere else retires them rather than showing another
+        # folder's answer under this folder's name.
+        self._dup_stack.set_visible_child_name("intro")
+        self._clear(self._dup_list)
 
         wanted = self._path
 
@@ -1365,9 +1344,9 @@ class StorageDialog(Adw.Dialog):
         self._summary.set_subtitle(detail)
         self._summary.set_subtitle_lines(0)
 
-        self._clear()
+        self._clear(self._list)
         if not report["children"]:
-            self._empty("Nothing in this folder")
+            self._empty(self._list, "Nothing in this folder")
             return
 
         largest = report["children"][0]["total"] or 1
@@ -1399,11 +1378,9 @@ class StorageDialog(Adw.Dialog):
     # ------------------------------------------------------------------ #
     # Duplicates
     # ------------------------------------------------------------------ #
-    def _on_duplicates_clicked(self, _button) -> None:
+    def _on_scan_duplicates(self, _button) -> None:
         self._banner.set_revealed(False)
-        self._stack.set_visible_child_name("scanning")
-        self._status.set_title("Looking for duplicates…")
-        self._duplicates_button.set_sensitive(False)
+        self._dup_stack.set_visible_child_name("scanning")
 
         wanted = self._path
 
@@ -1421,32 +1398,32 @@ class StorageDialog(Adw.Dialog):
 
         run_async(work,
                   on_done=lambda groups: self._on_duplicates(wanted, groups),
-                  on_error=lambda exc: self._on_failed(wanted, exc))
+                  on_error=lambda exc: self._on_failed(wanted, exc,
+                                                       duplicates=True))
 
     def _on_duplicates(self, path: str, groups: list) -> None:
         if path != self._path:
             return
-        self._stack.set_visible_child_name("list")
-        self._duplicates_button.set_sensitive(True)
-        self._clear()
+        self._dup_stack.set_visible_child_name("results")
+        self._clear(self._dup_list)
 
         location = f"{self._server.get('share', '')}:/{path}"
         if not groups:
-            self._summary.set_title(f"No duplicates found in {location}")
-            self._summary.set_subtitle(
+            self._dup_summary.set_title(f"No duplicates found in {location}")
+            self._dup_summary.set_subtitle(
                 f"Files under {format_bytes(self.DUPLICATE_MIN_SIZE)} "
                 f"were not considered.")
-            self._empty("Nothing appears to be stored twice")
+            self._empty(self._dup_list, "Nothing appears to be stored twice")
             return
 
         recoverable = sum(group["wasted"] for group in groups)
-        self._summary.set_title(
+        self._dup_summary.set_title(
             f"{len(groups)} possible duplicate group(s) in {location}")
-        self._summary.set_subtitle(
+        self._dup_summary.set_subtitle(
             f"About {format_bytes(recoverable)} could be recovered. Matched by "
             f"size — check before deleting anything, and delete it yourself: "
             f"NASync never removes files here.")
-        self._summary.set_subtitle_lines(0)
+        self._dup_summary.set_subtitle_lines(0)
 
         for group in groups:
             row = Adw.ExpanderRow(
@@ -1456,27 +1433,35 @@ class StorageDialog(Adw.Dialog):
             for rel in group["paths"]:
                 copy = Adw.ActionRow(title=rel)
                 copy.set_activatable(False)
+                # `.dimmed` is the modern spelling but arrived in libadwaita
+                # 1.7; this app supports 1.5, where it styles nothing.
                 copy.add_css_class("dim-label")
                 row.add_row(copy)
-            self._list.append(row)
+            self._dup_list.append(row)
 
     # ------------------------------------------------------------------ #
-    def _clear(self) -> None:
-        while (row := self._list.get_first_child()) is not None:
-            self._list.remove(row)
+    @staticmethod
+    def _clear(listbox) -> None:
+        while (row := listbox.get_first_child()) is not None:
+            listbox.remove(row)
 
-    def _empty(self, message: str) -> None:
+    @staticmethod
+    def _empty(listbox, message: str) -> None:
         row = Adw.ActionRow(title=message)
         row.set_activatable(False)
         row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
-        self._list.append(row)
+        listbox.append(row)
 
-    def _on_failed(self, path: str, exc: Exception) -> None:
+    def _on_failed(self, path: str, exc: Exception, duplicates=False) -> None:
         if path != self._path:
             return
-        self._stack.set_visible_child_name("list")
-        self._duplicates_button.set_sensitive(True)
-        self._clear()
+        if duplicates:
+            # Back to the invitation, not to an empty results list that looks
+            # like an answer.
+            self._dup_stack.set_visible_child_name("intro")
+        else:
+            self._stack.set_visible_child_name("list")
+            self._clear(self._list)
         self._banner.set_title(str(exc))
         self._banner.add_css_class("error")
         self._banner.set_revealed(True)
@@ -1547,13 +1532,20 @@ class PairDialog(Adw.Dialog):
 
         self._dest = Adw.EntryRow(title="Destination under the share")
         self._dest.set_text(self._pair.get("server", ""))
-        if self._server and self._server.get("ip"):
-            browse_remote = Gtk.Button(icon_name="folder-remote-symbolic")
-            browse_remote.set_valign(Gtk.Align.CENTER)
-            browse_remote.set_tooltip_text("Browse the server")
-            browse_remote.add_css_class("flat")
-            browse_remote.connect("clicked", self._on_browse_remote_clicked)
-            self._dest.add_suffix(browse_remote)
+        # Always present, so the two fields read alike; disabled when there is
+        # no server to browse. Omitting it left one entry row with a browse
+        # affordance and the other without, identical otherwise, with nothing
+        # on screen explaining the difference.
+        reachable = bool(self._server and self._server.get("ip"))
+        browse_remote = Gtk.Button(icon_name="folder-remote-symbolic")
+        browse_remote.set_valign(Gtk.Align.CENTER)
+        browse_remote.add_css_class("flat")
+        browse_remote.set_sensitive(reachable)
+        browse_remote.set_tooltip_text(
+            "Browse the server" if reachable
+            else "Add this server's address before browsing it")
+        browse_remote.connect("clicked", self._on_browse_remote_clicked)
+        self._dest.add_suffix(browse_remote)
         group.add(self._dest)
 
         self._name = Adw.EntryRow(title="Name (optional)")
