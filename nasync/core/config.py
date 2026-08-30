@@ -18,17 +18,35 @@ DEFAULT_SYNC_MODE = "mirror"
 # small hours: the machine is usually idle and the network quiet.
 DEFAULT_SYNC_TIME = "02:00"
 
+#: The key a server's sync root is stored under. Every pair on that server
+#: syncs *inside* this path, so anything on the share beside it is structurally
+#: unreachable — not "no pair happens to point there", but outside the set of
+#: paths a pair is able to name at all.
+#:
+#: This exists because mirror mode deletes, and what used to stand between a
+#: mirror sync and an untouched folder was only that no pair pointed at it.
+#: That is a promise until someone changes it, and the change that breaks it —
+#: adding a pair with the wrong destination — looks entirely ordinary. A root
+#: turns "nothing points there" into "nothing can point there".
+#:
+#: Empty means the whole share, which is what every server configured before
+#: 0.19.0 has. Those keep working exactly as they did: the guarantee is opted
+#: into, not imposed on a share layout NASync cannot see.
+SERVER_ROOT = "root"
+
 #: The settings that belong to a server rather than to the app, with the value
 #: an unconfigured server takes. Kept in one place because three things have to
 #: agree about them: what a new server defaults to, what the 0.18.0 migration
 #: writes, and which keys must survive `add_or_update_server` rebuilding a
-#: server entry.
+#: server entry — a rebuild that would otherwise drop the sync root, which is
+#: the one field whose loss is dangerous rather than merely annoying.
 #:
 #: `mirror` is the default mode for the same reason it always was — it is what
 #: a push did before the mode existed — and both triggers default to off,
 #: because opting someone into an unattended sync that deletes on the server is
 #: not a default.
 SERVER_SETTINGS = {
+    SERVER_ROOT: "",
     "sync_mode": DEFAULT_SYNC_MODE,
     "live_sync": False,
     "scheduled_sync": False,
@@ -62,6 +80,32 @@ def normalize_time(value, fallback: str = DEFAULT_SYNC_TIME) -> str:
         return require_time(value)
     except ValueError:
         return fallback
+
+
+def normalize_remote(path: str) -> str:
+    """A share-relative path with no leading/trailing slashes and no "." parts.
+
+    Rejects anything that climbs upwards. A pair whose destination could
+    contain ".." would be able to name a folder outside its server's sync
+    root, which is the entire thing the root exists to prevent.
+    """
+    cleaned = (path or "").replace("\\", "/").strip("/")
+    parts = [part for part in cleaned.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise ValueError(
+            "A server path can't contain '..' — it has to stay inside the "
+            "sync root."
+        )
+    return "/".join(parts)
+
+
+def join_remote(root: str, path: str) -> str:
+    """Join a pair's destination onto its sync root, staying inside it."""
+    root = normalize_remote(root)
+    rest = normalize_remote(path)
+    if not root:
+        return rest
+    return f"{root}/{rest}" if rest else root
 
 
 def host_config_dir() -> Path:
@@ -481,7 +525,7 @@ class Config:
     # ------------------------------------------------------------------ #
     def add_or_update_server(self, name: str, ip: str, username: str,
                              password: str, share: str, port: int = 445,
-                             encrypt: bool = False) -> str:
+                             encrypt: bool = False, root: str = None) -> str:
         # The password is written first, deliberately. Sealing it can fail — a
         # keyring that went away mid-session — and doing it before anything is
         # mutated means that failure leaves the config exactly as it was,
@@ -509,6 +553,10 @@ class Config:
         if existing:
             entry.update({key: existing[key] for key in SERVER_SETTINGS
                           if key in existing})
+        # Given explicitly, it wins — that is how a server gets its root at
+        # creation, and how the editor changes one.
+        if root is not None:
+            entry[SERVER_ROOT] = normalize_remote(root)
 
         self.data["servers"] = [s for s in self.data["servers"] if s["name"] != name]
         self.data["servers"].append(entry)
@@ -529,7 +577,7 @@ class Config:
 
     def save_server(self, name: str, ip: str, username: str, password: str,
                     share: str, port: int = 445, orig_name: str = None,
-                    encrypt: bool = False) -> str:
+                    encrypt: bool = False, root: str = None) -> str:
         """Add or update a server, renaming in place when the name changed.
 
         The rename path exists so editing a server's name doesn't lose the
@@ -546,7 +594,7 @@ class Config:
 
             self.remove_server(orig_name)
             self.add_or_update_server(name, ip, username, password, share, port,
-                                      encrypt)
+                                      encrypt, root=root)
             if pairs:
                 self.data["pairs_by_server"][name] = pairs
             if settings:
@@ -555,7 +603,7 @@ class Config:
                 self.save()
         else:
             self.add_or_update_server(name, ip, username, password, share, port,
-                                      encrypt)
+                                      encrypt, root=root)
         return name
 
     def remove_server(self, name: str):
@@ -658,6 +706,29 @@ class Config:
             )
         entry.update(values)
         self.save()
+
+    # ------------------------------------------------------------------ #
+    # The sync root — the boundary every pair lives inside
+    # ------------------------------------------------------------------ #
+    def get_root(self, server: str = None) -> str:
+        """This server's sync root, as a clean relative path ("" = whole share)."""
+        return normalize_remote(self._server_entry(server).get(SERVER_ROOT, ""))
+
+    def set_root(self, path: str, server: str = None) -> str:
+        """Set the sync root. Everything on the share beside it becomes
+        unreachable to every pair, now and later."""
+        root = normalize_remote(path)
+        self._write_server_settings(server, **{SERVER_ROOT: root})
+        return root
+
+    def resolve_remote(self, server_path: str, server: str = None) -> str:
+        """Where a pair's destination actually lands on the share.
+
+        A pair's stored path is relative to its server's sync root, so this is
+        the one place the two are joined — and the one place an attempt to
+        climb out of the root is refused.
+        """
+        return join_remote(self.get_root(server), server_path)
 
     # ------------------------------------------------------------------ #
     # Sync mode — per server since 0.18.0
@@ -861,6 +932,11 @@ class Config:
         if not target:
             raise ValueError("No server selected. Add a server first.")
 
+        # Normalised here rather than at sync time, so a destination that
+        # cannot stay inside the sync root is refused while someone is looking
+        # at the error, not discovered by a mirror run at 2am.
+        server_path = normalize_remote(server_path)
+
         local_path = os.path.abspath(os.path.expanduser(local_path))
         if name is None:
             name = os.path.basename(local_path.rstrip("/")) or "root"
@@ -879,6 +955,9 @@ class Config:
 
     def update_pair(self, orig_name: str, local_path: str, server_path: str,
                     name: str, server: str = None):
+        # Same reasoning as `add_pair`: refuse a destination that can't stay
+        # inside the sync root here, while someone is looking at the error.
+        server_path = normalize_remote(server_path)
         local_path = os.path.abspath(os.path.expanduser(local_path))
         if name != orig_name and self.get_pair(name, server):
             raise ValueError(f"A pair named '{name}' already exists.")

@@ -99,21 +99,32 @@ class Syncer:
         totals = {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0,
                   "unsupported": 0}
         try:
-            # A push dry-run only reads local disk, so don't require the server.
-            if not dry_run:
-                client.connect()
+            # A dry run connects too. The comment here used to say a push
+            # dry-run "only reads local disk", which was wrong in the case that
+            # matters most: working out what a **mirror** would delete requires
+            # indexing the destination, and without a session that index comes
+            # back empty or errors — so the one command someone runs to ask
+            # "what will this delete before I let it?" could not answer.
+            client.connect()
             for index, pair in enumerate(pairs, start=1):
                 self._pair_progress(index, len(pairs), pair["name"], verb)
                 self._report(f"\n{icon} {verb}: {pair['name']}  ({index}/{len(pairs)})")
+                landing = self.config.resolve_remote(pair["server"], self.server)
                 if direction == "push":
                     self._report(f"  Local:  {pair['local']}")
-                    self._report(f"  Server: {pair['server']}")
+                    self._report(f"  Server: {landing}")
                 else:
-                    self._report(f"  From Server: {pair['server']}")
+                    self._report(f"  From Server: {landing}")
                     self._report(f"  To Local:    {pair['local']}")
                 try:
+                    # The pair stores its destination relative to the server's
+                    # sync root; this is where the two are joined. Doing it here
+                    # rather than at `add` time means changing a server's root
+                    # moves its pairs with it, and a pair can never name a path
+                    # outside the root even if the config file is hand-edited.
                     stats = client.sync_directory(
-                        pair["local"], pair["server"],
+                        pair["local"],
+                        self.config.resolve_remote(pair["server"], self.server),
                         direction=direction, dry_run=dry_run, mirror=mirror,
                     )
                     for key in totals:

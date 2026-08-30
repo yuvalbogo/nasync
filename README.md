@@ -325,7 +325,13 @@ once rather than once a second.
 
 Notifications go through your desktop's notification portal inside a Flatpak,
 and `gdbus` (part of glib2) or `notify-send` elsewhere. `nasync notifications
---test` names which one it used. On a machine with none of them — a headless
+--test` names which one it used.
+
+**A sync that changed nothing doesn't notify.** A run reports when it moved
+files, removed them, or hit errors, and a scheduled run that couldn't happen
+at all still speaks up at critical urgency — but a daily "0 transferred" would
+only train you to ignore the one message that matters. `nasync status` says
+what automatic syncing is doing whenever you want to check. On a machine with none of them — a headless
 server, a locked-down container — syncing carries on exactly as before,
 silently.
 

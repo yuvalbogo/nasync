@@ -84,7 +84,9 @@ def test_pairs():
         # edit: rename + change destination
         c.update_pair("Documents", "/home/user/docs", "/DocsV2", "Docs")
         assert c.get_pair("Documents") is None
-        assert c.get_pair("Docs")["server"] == "/DocsV2"
+        # Stored normalised since 0.19.0: a destination is relative to the
+        # server's sync root, and a leading slash would suggest otherwise.
+        assert c.get_pair("Docs")["server"] == "DocsV2"
         # editing to a name owned by another pair is rejected
         try:
             c.update_pair("Docs", "/x", "/x", "Photos")
@@ -123,7 +125,7 @@ def test_pairs_belong_to_one_server():
 
         # Editing one server's pair leaves the other's alone.
         c.update_pair("Documents", "/moved", "/Docs2", "Documents", server="work")
-        assert c.get_pair("Documents", "home")["server"] == "/Docs"
+        assert c.get_pair("Documents", "home")["server"] == "Docs"
         print("✅ test_pairs_belong_to_one_server passed")
 
 
@@ -706,3 +708,86 @@ if __name__ == "__main__":
     test_scheduled_time_is_validated_and_normalized()
     test_legacy_automation_keys_migrate_to_live_sync()
     test_record_scheduled_run_does_not_clobber_concurrent_edits()
+
+
+# --------------------------------------------------------------------------- #
+# The sync root (0.19.0)
+# --------------------------------------------------------------------------- #
+def test_pairs_land_inside_the_sync_root():
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("nas", "10.0.0.5", "u", "p", "Storage", 445,
+                               root="sync")
+        c.add_pair("/home/user/docs", "/Documents", "docs")
+        assert c.resolve_remote(c.get_pair("docs")["server"]) == "sync/Documents"
+        print("✅ test_pairs_land_inside_the_sync_root passed")
+
+
+def test_a_pair_cannot_name_a_path_outside_the_root():
+    """The whole point: not "no pair happens to point at the wedding video",
+    but "no pair is able to name it"."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("nas", "10.0.0.5", "u", "p", "Storage", 445,
+                               root="sync")
+        for escape in ("../Marrige video", "/../etc", "a/../../b", "..\\up"):
+            try:
+                c.add_pair("/home/user/x", escape, f"p{len(escape)}")
+                raise AssertionError(f"escaped the root with {escape!r}")
+            except ValueError:
+                pass
+        print("✅ test_a_pair_cannot_name_a_path_outside_the_root passed")
+
+
+def test_a_root_of_its_own_is_not_escapable_by_the_share_root_trick():
+    """A destination of "/" used to mean the whole share, which made mirror
+    delete everything on it. With a root it means the root itself."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("nas", "10.0.0.5", "u", "p", "Storage", 445,
+                               root="sync")
+        c.add_pair("/home/user/everything", "/", "all")
+        assert c.resolve_remote(c.get_pair("all")["server"]) == "sync"
+        print("✅ test_a_root_of_its_own_is_not_escapable_by_the_share_root_trick passed")
+
+
+def test_an_existing_server_without_a_root_is_unchanged():
+    """Servers configured before 0.19.0 keep syncing exactly where they did;
+    the guarantee is opted into, not imposed on a layout NASync can't see."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("old", "10.0.0.5", "u", "p", "Storage", 445)
+        c.add_pair("/home/user/docs", "/Documents", "docs")
+        assert c.get_root("old") == ""
+        assert c.resolve_remote(c.get_pair("docs")["server"]) == "Documents"
+        print("✅ test_an_existing_server_without_a_root_is_unchanged passed")
+
+
+def test_the_root_survives_editing_and_renaming_a_server():
+    """`add_or_update_server` rebuilds the entry from its arguments, so the one
+    field whose loss is dangerous has to be carried across explicitly."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("nas", "10.0.0.5", "u", "p", "Storage", 445,
+                               root="sync")
+        c.add_or_update_server("nas", "10.0.0.5", "u", "p", "Storage", 4450)
+        assert c.get_root("nas") == "sync"
+        c.save_server("attic", "10.0.0.5", "u", "p", "Storage", 4450,
+                      orig_name="nas")
+        assert c.get_root("attic") == "sync"
+        assert Config().get_root("attic") == "sync"
+        print("✅ test_the_root_survives_editing_and_renaming_a_server passed")
+
+
+def test_changing_the_root_moves_every_pair_with_it():
+    """Pairs store their destination relative to the root, so the root is the
+    single place that decides where a server's syncing happens."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c = _cfg(tmp)
+        c.add_or_update_server("nas", "10.0.0.5", "u", "p", "Storage", 445,
+                               root="sync")
+        c.add_pair("/home/user/docs", "/Documents", "docs")
+        assert c.resolve_remote("Documents") == "sync/Documents"
+        c.set_root("backups/laptop", server="nas")
+        assert c.resolve_remote("Documents") == "backups/laptop/Documents"
+        print("✅ test_changing_the_root_moves_every_pair_with_it passed")

@@ -3,11 +3,49 @@ import sys
 import click
 from getpass import getpass
 from nasync import __version__
-from nasync.core.config import SYNC_MODES, Config
+from nasync.core.config import (SYNC_MODES, Config, join_remote,
+                                normalize_remote)
 from nasync.core.samba import SAMBAClient
 from nasync.core.sync import Syncer
 from nasync.format import format_bytes, format_volume
 from nasync.system import notify, service
+
+
+#: Said at the two points a server is created. Deliberately concrete about the
+#: consequence rather than abstract about the concept: "scope" means nothing at
+#: 11pm, "the folders beside it can never be deleted" means something.
+ROOT_EXPLANATION = """  A sync root is the one folder on the share that NASync is allowed to
+  touch. Every folder you sync goes inside it, and NASync can never
+  reach anything beside it — so a photo library or a video sitting next
+  to the root stays there no matter what you sync, or how you set the
+  sync mode later.
+
+  This matters because mirror mode deletes: it makes the server match
+  your computer, so anything in range that you don't have locally goes.
+  The root is what puts things out of range permanently, instead of
+  relying on nobody ever pointing a folder at them by mistake."""
+
+
+def _prompt_root(default: str = "nasync") -> str:
+    """Ask for the sync root, explaining what it protects."""
+    click.echo("\n  Sync root")
+    click.echo(ROOT_EXPLANATION)
+    while True:
+        raw = click.prompt("\n  Folder on the share to sync inside",
+                           default=default)
+        try:
+            root = normalize_remote(raw)
+        except ValueError as e:
+            click.echo(f"    ✗ {e}")
+            continue
+        if not root:
+            click.echo(
+                "    ⚠️  An empty root means the whole share is in range, "
+                "which is the situation the root exists to avoid.")
+            if not click.confirm("    Use the whole share anyway?",
+                                 default=False):
+                continue
+        return root
 
 
 def _choose_share(shares):
@@ -38,20 +76,23 @@ def _add_pairs_interactive(config, share):
                                default=False):
             continue
 
-        dest = click.prompt("  Destination path under the share (e.g. /Docs)")
+        root = config.get_root()
+        inside = f"{share}:/{root}" if root else f"{share}:/"
+        dest = click.prompt(f"  Destination inside {inside} (e.g. Docs)")
         first = dest.strip("/").split("/")[0] if dest.strip("/") else ""
         if first == share:
             click.echo(
                 f"    ⚠️  That starts with the share name '{share}'. Paths are "
-                f"relative to the share root, so this would nest under "
-                f"'{share}/{share}/…' — drop the leading '{share}/' unless you mean it."
+                f"relative to the sync root, so this would nest under "
+                f"'{inside}/{share}/…' — drop the leading '{share}/' unless you mean it."
             )
 
         default_name = os.path.basename(local_abs.rstrip("/")) or "root"
         name = click.prompt("  Name for this pair", default=default_name)
         try:
             saved = config.add_pair(local_abs, dest, name)
-            click.echo(f"    ✓ added '{saved}':  {local_abs} → {dest}")
+            click.echo(f"    ✓ added '{saved}':  {local_abs} → "
+                       f"{share}:/{config.resolve_remote(dest)}")
         except ValueError as e:
             click.echo(f"    ✗ {e}")
 
@@ -79,12 +120,16 @@ def init():
     encrypt = click.confirm(
         "Encrypt the connection? (needs SMB 3; slower on older NAS hardware)",
         default=False)
+    root = _prompt_root()
 
     config = Config()
     config.add_or_update_server(name, ip, username, password, share, port,
-                                encrypt)
+                                encrypt, root=root)
     config.set_active_server(name)
     click.echo(f"✅ Saved server '{name}' ({ip}:{port}) and set it active")
+    click.echo(f"   Syncing inside '{share}:/{root}' — "
+               f"nothing beside it can be touched." if root else
+               "   ⚠️  No sync root: the whole share is in range.")
 
 
 @main.command()
@@ -132,17 +177,23 @@ def setup():
                 click.echo("Setup cancelled — nothing was saved.")
                 return
 
+    root = _prompt_root()
+
     default_name = share or ip
-    name = click.prompt("  Name for this server", default=default_name)
+    name = click.prompt("\n  Name for this server", default=default_name)
     # Re-running setup against a server that already exists must not turn its
     # encryption off. `add_or_update_server` defaults the flag to False, so
     # omitting it here would silently downgrade a configured NAS to plaintext
     # transfers — the opposite of what `nasync encryption` promises.
     existing = config.get_server(name)
     config.add_or_update_server(name, ip, username, password, share, port,
-                                encrypt=bool(existing and existing["encrypt"]))
+                                encrypt=bool(existing and existing["encrypt"]),
+                                root=root)
     config.set_active_server(name)
     click.echo(f"  Saved server '{name}' ({ip}:{port}, share '{share}').")
+    if root:
+        click.echo(f"  Everything syncs inside '{share}:/{root}'. Anything "
+                   f"else on this share is out of NASync's reach.")
 
     # ---- Step 3: sync pairs -------------------------------------------------
     click.echo("\nStep 3/3 — Sync pairs")
@@ -198,13 +249,19 @@ def list_pairs(pair, server, show_all):
         details = config.get_server(name, with_password=False)
         location = f"{details['ip']} / {details['share']}" if details else "?"
         click.echo(f"\n📋 {name}  ({location})")
+        root = config.get_root(name)
+        share = details["share"] if details else ""
+        click.echo(f"  Sync root: {share}:/{root}" if root
+                   else "  Sync root: none — the whole share is in range")
         if not pairs:
             click.echo("  No sync pairs yet.")
             continue
         for p in pairs:
             click.echo(f"  {p['name']}")
             click.echo(f"    Local:  {p['local']}")
-            click.echo(f"    Server: {p['server']}")
+            # The resolved path, not the stored one: where files actually land
+            # is the thing worth checking before a mirror sync.
+            click.echo(f"    Server: {share}:/{config.resolve_remote(p['server'], name)}")
 
 
 @main.command()
@@ -589,6 +646,65 @@ def encryption(state, server_name):
         # Said now rather than at the next sync: a scheduled run that starts
         # failing at 02:00 because the NAS is too old is a bad way to find out.
         click.echo("   Check it works now with: nasync test-connection")
+
+
+@main.command()
+@click.argument("path", required=False)
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server (default: the active one)")
+def root(path, server):
+    """Show or set a server's sync root — the folder it may touch
+
+    Every sync pair on the server lives inside this folder, and NASync can
+    never reach anything beside it. That is what keeps a photo library or a
+    video sitting next to the root safe from a mirror sync, permanently,
+    rather than only for as long as no pair happens to point at it.
+    """
+    config = Config()
+    server = _require_server(config, server)
+    share = (config.get_server(server, with_password=False) or {}).get("share", "")
+
+    if path is None:
+        current = config.get_root(server)
+        if current:
+            click.echo(f"Sync root ({server}): {share}:/{current}")
+            click.echo("  Everything beside it on this share is out of reach.")
+        else:
+            click.echo(f"Sync root ({server}): none — the whole share is in range")
+            click.echo("  Set one with: nasync root <folder>")
+        return
+
+    pairs = config.get_pairs(server)
+    try:
+        new_root = normalize_remote(path)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
+    # Pairs are stored relative to the root, so moving it moves all of them —
+    # and in mirror mode the first sync afterwards would delete whatever is in
+    # the new location and orphan everything in the old one.
+    if pairs and new_root != config.get_root(server):
+        click.echo(f"⚠️  '{server}' has {len(pairs)} sync pair(s). They are "
+                   f"stored relative to the root, so they would move:")
+        for pair in pairs[:5]:
+            click.echo(f"     {share}:/{config.resolve_remote(pair['server'], server)}"
+                       f"  →  {share}:/{join_remote(new_root, pair['server'])}")
+        if len(pairs) > 5:
+            click.echo(f"     … and {len(pairs) - 5} more")
+        if config.get_sync_mode(server) == "mirror":
+            click.echo("   This server is on mirror mode, so the next sync "
+                       "would delete anything already in the new location "
+                       "that isn't on this machine.")
+        if not click.confirm("   Move them?", default=False):
+            click.echo("Nothing changed.")
+            return
+
+    config.set_root(new_root, server=server)
+    if new_root:
+        click.echo(f"✅ Sync root ({server}): {share}:/{new_root}")
+    else:
+        click.echo(f"⚠️  Sync root ({server}) cleared — the whole share is now "
+                   f"in range of a sync.")
 
 
 @main.command()
@@ -1148,6 +1264,11 @@ def status():
         # Stated per server rather than once for the app: since 0.18.0 these
         # can differ, and "sync mode: mirror" over a list of servers would be
         # a claim about all of them.
+        server_root = config.get_root(s["name"])
+        click.echo(f"        sync root:  "
+                   + (f"{s['share']}:/{server_root}  (nothing beside it is in range)"
+                      if server_root else
+                      "none — the whole share is in range of a sync"))
         server_mode = config.get_sync_mode(s["name"])
         click.echo(f"        sync mode:  {server_mode} — {_MODE_HELP[server_mode]}")
 
@@ -1163,7 +1284,8 @@ def status():
         mark = "●" if s["name"] == active else "○"
         click.echo(f"    {mark} {s['name']} ({len(owned)})")
         for p in owned:
-            click.echo(f"        • {p['name']}: {p['local']} → {p['server']}")
+            click.echo(f"        • {p['name']}: {p['local']} → "
+                       f"{s['share']}:/{config.resolve_remote(p['server'], s['name'])}")
         if not owned:
             click.echo("        ⚠️  none yet")
 

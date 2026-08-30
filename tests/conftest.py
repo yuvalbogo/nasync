@@ -54,12 +54,23 @@ class RecordingNotifier:
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
         self.sent = []
+        self.withdrawn = []
 
     def notify(self, summary, body="", urgency="normal"):
         if not self.enabled:
             return 0
         self.sent.append((summary, body, urgency))
         return 1
+
+    def close(self, withdrawer=None):
+        """Part of the real interface since 0.18.1, so the double has it too.
+
+        Without this the automation layer's `close()` on a quiet run raised
+        `AttributeError` into `sync_now`'s catch-all, which reported the run as
+        failed — a fake that omits a method the caller uses does not just miss
+        a test, it invents a failure.
+        """
+        self.withdrawn.append(self.sent[-1] if self.sent else None)
 
 
 @pytest.fixture

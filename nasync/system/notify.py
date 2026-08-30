@@ -16,10 +16,20 @@ backend here speaks a notification protocol directly.
     permission Flathub reviewers reasonably ask you to justify when a portal
     already does the job. It also replaces by an id *we* choose, which survives
     a restart of the process, rather than by a number the daemon hands back.
-  * **gdbus** — preferred everywhere else. It ships with glib2, which is
-    installed anywhere a notification daemon exists, and exposes
+  * **gdbus** — preferred everywhere outside a sandbox. It ships with glib2,
+    which is installed anywhere a notification daemon exists, and exposes
     ``replaces_id``, so a run's "started" notification is *replaced* by its
     "finished" one instead of stacking up a pair per sync.
+
+    **It deliberately sends no ``desktop-entry`` hint.** That hint is the
+    conventional way to attach an app's identity to a notification, but GNOME
+    Shell 50 reads it as "this app should be using ``org.gtk.Notifications``"
+    and closes the notification within milliseconds of accepting it —
+    confirmed on the bus, and true for other apps' ids too, so it is not
+    something about NASync. Going through ``org.gtk.Notifications`` instead was
+    tried and is worse: that route is accepted and then never displayed at all.
+    The identity survives without the hint anyway, through ``app_name`` and the
+    icon.
   * **notify-send** — the fallback, for the rare desktop with libnotify but no
     gdbus. No replacement, so notifications accumulate.
 
@@ -40,6 +50,7 @@ APP_NAME = "NASync"
 #: is the slot a NASync sync run occupies. One slot that stays current beats a
 #: tray filling up with the history of a service that syncs all day.
 PORTAL_NOTIFICATION_ID = "nasync-sync"
+
 
 #: freedesktop urgency levels. Failures are critical so they survive Do Not
 #: Disturb — a sync that didn't happen is the one thing worth interrupting for.
@@ -94,6 +105,32 @@ def send(summary: str, body: str = "", urgency: str = "normal",
     return 0
 
 
+def withdraw(notification_id: int = 0) -> None:
+    """Take a notification back off the screen.
+
+    Used when a run turns out to have changed nothing: the "Syncing…" banner
+    has already been posted by then, and leaving it up would be worse than the
+    summary it was going to be replaced by.
+
+    Silent about failure for the same reason `send` is — and a no-op on
+    `notify-send`, which hands back no id to close.
+    """
+    name = backend()
+    try:
+        if name == "portal":
+            portal.remove_notification(PORTAL_NOTIFICATION_ID)
+        elif name == "gdbus" and notification_id:
+            subprocess.run(
+                ["gdbus", "call", "--session",
+                 "--dest", "org.freedesktop.Notifications",
+                 "--object-path", "/org/freedesktop/Notifications",
+                 "--method", "org.freedesktop.Notifications.CloseNotification",
+                 str(int(notification_id))],
+                capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
 def _send_portal(summary, body, urgency) -> int:
     """Post through the portal, which replaces by id rather than by number.
 
@@ -111,10 +148,12 @@ def _send_portal(summary, body, urgency) -> int:
 
 
 def _send_gdbus(summary, body, level, replaces, timeout_ms) -> int:
-    # The hints tell the shell which app this is, so the notification carries
-    # the NASync name and icon instead of a generic bell.
-    hints = (f"{{'desktop-entry': <'{APP_ID}'>, "
-             f"'urgency': <byte {level}>}}")
+    # Urgency only. A `desktop-entry` hint belongs here by convention and is
+    # what would normally group the notification under the app — but GNOME
+    # Shell 50 closes any notification carrying one, milliseconds after
+    # accepting it, so sending it makes the notification invisible on that
+    # desktop. `app_name` and the icon below carry the identity instead.
+    hints = f"{{'urgency': <byte {level}>}}"
     result = subprocess.run(
         ["gdbus", "call", "--session",
          "--dest", "org.freedesktop.Notifications",
@@ -132,9 +171,10 @@ def _send_gdbus(summary, body, level, replaces, timeout_ms) -> int:
 
 
 def _send_notify_send(summary, body, urgency, timeout_ms) -> int:
+    # No `desktop-entry` hint here either — see `_send_gdbus`; notify-send's
+    # notifications are closed by GNOME 50 just the same when it carries one.
     command = ["notify-send", "--app-name", APP_NAME, "--icon", APP_ID,
-               "--urgency", urgency if urgency in URGENCY else "normal",
-               f"--hint=string:desktop-entry:{APP_ID}"]
+               "--urgency", urgency if urgency in URGENCY else "normal"]
     if timeout_ms and timeout_ms > 0:
         command += ["--expire-time", str(int(timeout_ms))]
     command += [summary, body]
@@ -172,3 +212,14 @@ class Notifier:
         if new_id:
             self._id = new_id
         return new_id
+
+    def close(self, withdrawer=withdraw) -> None:
+        """Retract this notifier's current notification, if it has one.
+
+        Forgets the id either way: whatever was on screen is gone, so the next
+        notification should be a new one rather than a replacement of something
+        that is no longer there.
+        """
+        if self._id and self.enabled:
+            withdrawer(self._id)
+        self._id = 0

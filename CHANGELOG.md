@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.18.1] - 2026-08-30
+
+### Fixed
+- **Notifications never appeared on GNOME 50.** Every NASync notification was
+  accepted by the notification daemon and then closed by the shell within ~15
+  milliseconds, so a background sync announced itself to nobody — the exact
+  failure the notification code exists to prevent, and one that made a working
+  sync indistinguishable from one that never ran.
+
+  The trigger was the `desktop-entry` hint, which is the conventional way to
+  attach an app's identity to a notification. GNOME Shell 50 reads it as "this
+  app should be using `org.gtk.Notifications`" and withdraws the notification.
+  Confirmed on the bus: with the hint the shell emits `NotificationClosed`
+  (reason 2, "dismissed") milliseconds after `Notify` returns; without it the
+  notification survives. It is not specific to NASync — another app's id
+  behaves the same way.
+
+  NASync no longer sends that hint. The identity still travels, through the
+  application name and icon. Going through `org.gtk.Notifications` instead was
+  tried first and is worse: that route is accepted and then never displayed,
+  so it looks like it works right up until nobody sees anything.
+
+### Changed
+- **An automatic sync that changed nothing now says nothing.** Most scheduled
+  runs over stable folders move no files, and a daily "0 transferred" is the
+  kind of noise that teaches people to ignore — or switch off — the channel
+  that also carries *"your scheduled sync didn't run"*. A run still reports
+  whenever it transferred, deleted, or hit an error, and the critical
+  notification for a run that could not happen is unchanged. The "Syncing…"
+  banner is posted before a run, so a quiet one now withdraws it rather than
+  leaving it on screen.
+
+  The reassurance that automatic syncing is alive is still available whenever
+  it's wanted, in `nasync status` and in the app.
+
 ## [0.18.0] - 2026-08-30
 
 **The sync mode and the automatic-sync triggers now belong to a server rather

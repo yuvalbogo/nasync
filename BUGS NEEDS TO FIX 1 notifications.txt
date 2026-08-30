@@ -1,0 +1,3 @@
+BUGS NEEDS TO FIX:
+1. notifications: one notification after a sync. right now it raises a notification for each file independently - which results as large number of "1 file tranfered" instead of 1 "X files transfered".
+2. mirror sync deletes all files keep the empty directories - it should delete the directories as well.

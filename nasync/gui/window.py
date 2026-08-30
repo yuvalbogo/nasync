@@ -280,6 +280,30 @@ class NasyncWindow(Adw.ApplicationWindow):
         """
         page = Adw.PreferencesPage()
 
+        # Stated before the mode, because it bounds what the mode can do: what
+        # mirror deletes is "things inside this folder", and seeing the folder
+        # is what makes that sentence mean something.
+        root = self.config.get_root(name)
+        share = (self.config.get_server(name, with_password=False) or {}).get("share", "")
+        root_group = Adw.PreferencesGroup(title="Sync root")
+        root_row = Adw.ActionRow(
+            title=f"{share}:/{root}" if root else "No sync root",
+            subtitle=("Everything this server syncs lives inside here. Nothing "
+                      "beside it on the share can be reached — or deleted."
+                      if root else
+                      "The whole share is in range of a sync. Set a root in "
+                      "this server's settings to put the rest out of reach."),
+        )
+        root_row.set_subtitle_lines(0)
+        root_row.set_activatable(False)
+        root_row.add_prefix(Gtk.Image(
+            icon_name="folder-symbolic" if root else "dialog-warning-symbolic"))
+        edit_root = _icon_button("document-edit-symbolic", "Change the sync root",
+                                 self._on_edit_server, name)
+        root_row.add_suffix(edit_root)
+        root_group.add(root_row)
+        page.add(root_group)
+
         mode_group = Adw.PreferencesGroup(
             title="Sync mode",
             description=f"What a sync does with files that are on '{name}' but "
@@ -679,6 +703,7 @@ class NasyncWindow(Adw.ApplicationWindow):
             values["password"], values["share"], values["port"],
             orig_name=values.get("orig_name"),
             encrypt=values.get("encrypt", False),
+            root=values.get("root"),
         )
         self.config.set_active_server(values["name"])
         self.refresh_servers()

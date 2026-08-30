@@ -13,6 +13,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from nasync.core.config import join_remote, normalize_remote  # noqa: E402
 from nasync.core.samba import SAMBAClient  # noqa: E402
 from nasync.format import format_bytes, format_volume  # noqa: E402
 from nasync.gui.threads import run_async  # noqa: E402
@@ -687,6 +688,35 @@ class ServerDialog(Adw.Dialog):
         share_group.add(self._test_row)
         page.add(share_group)
 
+        # Its own group, and worded around what it protects rather than what it
+        # is: "scope" means nothing to someone setting up a NAS, "the folders
+        # beside it can never be deleted" means something.
+        root_group = Adw.PreferencesGroup(
+            title="Sync root",
+            description="The one folder on the share NASync may touch. Every "
+                        "folder you sync goes inside it, and nothing beside it "
+                        "can ever be reached — so a photo library or a video "
+                        "sitting next to the root stays safe whatever you sync "
+                        "later, and whichever sync mode you choose.",
+        )
+        self._root = Adw.EntryRow(title="Folder on the share")
+        self._root.set_text(self._server.get("root", "") or "")
+        root_group.add(self._root)
+
+        self._root_warning = Adw.ActionRow(
+            title="No sync root — the whole share is in range",
+            subtitle="Mirror mode deletes anything in range that isn't on this "
+                     "machine. With a root set, that can only ever mean things "
+                     "inside it.",
+        )
+        self._root_warning.set_subtitle_lines(0)
+        self._root_warning.set_activatable(False)
+        self._root_warning.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+        root_group.add(self._root_warning)
+        self._root.connect("changed", lambda *_: self._refresh_root_warning())
+        self._refresh_root_warning()
+        page.add(root_group)
+
         # Its own group, below the share: this is a property of the connection
         # rather than of the credentials, and the trade-off needs room to be
         # stated. Someone who turns it on and then can't connect should be able
@@ -721,6 +751,10 @@ class ServerDialog(Adw.Dialog):
             current = self._server.get("share")
             index = self._shares.index(current) if current in self._shares else 0
             self._share_row.set_selected(index)
+
+    def _refresh_root_warning(self) -> None:
+        """Shown only when there is no root, which is the state worth flagging."""
+        self._root_warning.set_visible(not self._root.get_text().strip(" /"))
 
     def _selected_share(self):
         index = self._share_row.get_selected()
@@ -788,8 +822,14 @@ class ServerDialog(Adw.Dialog):
         if not share:
             self._notify("Test the connection and pick a share.", error=True)
             return
+        try:
+            root = normalize_remote(self._root.get_text())
+        except ValueError as e:
+            self._notify(str(e), error=True)
+            return
         if self._on_saved:
-            self._on_saved({**values, "share": share, "orig_name": self._orig_name})
+            self._on_saved({**values, "share": share, "root": root,
+                            "orig_name": self._orig_name})
         self.close()
 
 
@@ -809,11 +849,16 @@ class RemoteBrowserDialog(Adw.Dialog):
     not freeze while even one directory is fetched over a slow link.
     """
 
-    def __init__(self, server: dict, start_path: str = "", on_chosen=None):
+    def __init__(self, server: dict, start_path: str = "", on_chosen=None,
+                 confine_to: str = ""):
         super().__init__()
         self._server = server
         self._on_chosen = on_chosen
-        self._path = (start_path or "").strip("/")
+        #: The server's sync root. Navigation never goes above it and the
+        #: chosen path comes back relative to it, so a folder a pair could not
+        #: legally name is never offered in the first place.
+        self._root = (confine_to or "").strip("/")
+        self._path = (start_path or "").strip("/") or self._root
 
         self.set_title("Choose a folder on the server")
         self.set_content_width(520)
@@ -900,7 +945,9 @@ class RemoteBrowserDialog(Adw.Dialog):
         self._banner.set_revealed(False)
         self._stack.set_visible_child_name("loading")
         self._location.set_label(f"{self._server.get('share', '')}:/{self._path}")
-        self._up.set_sensitive(bool(self._path))
+        # Greyed out at the sync root rather than silently inert, so the floor
+        # is visible instead of only being discovered by pressing it.
+        self._up.set_sensitive(bool(self._path) and not self._at_root())
 
         wanted = self._path
         server = self._server
@@ -974,8 +1021,26 @@ class RemoteBrowserDialog(Adw.Dialog):
         self._load()
 
     def _on_up_clicked(self, _button) -> None:
+        """Up one folder, but never above the sync root.
+
+        The root is the floor of this browser: a pair cannot name anything
+        outside it, so offering to navigate there would only let someone pick a
+        folder their pair is then refused for.
+        """
+        if self._at_root():
+            return
         self._path = self._path.rsplit("/", 1)[0] if "/" in self._path else ""
         self._load()
+
+    def _at_root(self) -> bool:
+        return self._path.strip("/") == self._root.strip("/")
+
+    def _relative_to_root(self) -> str:
+        """The chosen folder as the pair stores it — relative to the root."""
+        path, root = self._path.strip("/"), self._root.strip("/")
+        if root and path.startswith(root):
+            path = path[len(root):].strip("/")
+        return path
 
     def _on_select_clicked(self, _button) -> None:
         """Choose the folder currently being shown.
@@ -985,7 +1050,8 @@ class RemoteBrowserDialog(Adw.Dialog):
         look at it" ambiguity from an action that can delete files.
         """
         if self._on_chosen:
-            self._on_chosen("/" + self._path if self._path else "/")
+            chosen = self._relative_to_root()
+            self._on_chosen(chosen or "/")
         self.close()
 
 
@@ -1543,7 +1609,11 @@ class PairDialog(Adw.Dialog):
         self._local.add_suffix(browse)
         group.add(self._local)
 
-        self._dest = Adw.EntryRow(title="Destination under the share")
+        root = (self._server or {}).get("root", "") or ""
+        share = (self._server or {}).get("share", "") or "the share"
+        self._dest = Adw.EntryRow(
+            title=f"Destination inside {share}:/{root}" if root
+            else "Destination under the share")
         self._dest.set_text(self._pair.get("server", ""))
         # Always present, so the two fields read alike; disabled when there is
         # no server to browse. Omitting it left one entry row with a browse
@@ -1591,9 +1661,14 @@ class PairDialog(Adw.Dialog):
     def _on_browse_remote_clicked(self, _button) -> None:
         # Opens where the field currently points, so editing an existing pair
         # starts from that pair's folder rather than from the share root.
+        # Anchored at the sync root: the browser must not offer a folder the
+        # pair would be refused for naming, and what it hands back is relative
+        # to the root, the same shape the pair stores.
+        root = (self._server or {}).get("root", "") or ""
         RemoteBrowserDialog(
             self._server,
-            start_path=self._dest.get_text().strip(),
+            start_path=join_remote(root, self._dest.get_text().strip()),
+            confine_to=root,
             on_chosen=self._dest.set_text,
         ).present(self)
 

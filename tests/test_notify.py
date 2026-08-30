@@ -201,3 +201,72 @@ def test_a_portal_that_refuses_is_not_an_error(monkeypatch):
 
     assert notify.send("Sync complete") == 0
     print("✅ test_a_portal_that_refuses_is_not_an_error passed")
+
+
+# --------------------------------------------------------------------------- #
+# Surviving GNOME 50 (0.18.1)
+# --------------------------------------------------------------------------- #
+def test_no_desktop_entry_hint_is_sent(monkeypatch):
+    """GNOME Shell 50 closes any notification carrying that hint, milliseconds
+    after accepting it — so sending it makes NASync invisible there. Confirmed
+    on the bus, and not specific to our app id."""
+    calls = []
+    monkeypatch.setattr(notify.shutil, "which", lambda name: name == "gdbus")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or _Result(
+                            stdout="(uint32 7,)\n"))
+
+    notify.send("Sync complete", "12 transferred")
+    joined = " ".join(calls[0])
+    assert "desktop-entry" not in joined, joined
+    assert "urgency" in joined, joined
+    print("✅ test_no_desktop_entry_hint_is_sent passed")
+
+
+def test_notify_send_carries_no_hint_either(monkeypatch):
+    calls = []
+    monkeypatch.setattr(notify.shutil, "which",
+                        lambda name: name == "notify-send")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or _Result())
+
+    notify.send("Sync complete", "12 transferred")
+    assert not any("desktop-entry" in part for part in calls[0]), calls[0]
+    # The identity still travels, through the app name and icon.
+    assert "--app-name" in calls[0] and "--icon" in calls[0]
+    print("✅ test_notify_send_carries_no_hint_either passed")
+
+
+def test_a_notification_can_be_withdrawn(monkeypatch):
+    """Needed because "Syncing…" is posted before the run: a run that turns out
+    to have changed nothing has to take it back, not leave it up."""
+    calls = []
+    monkeypatch.setattr(notify.shutil, "which", lambda name: name == "gdbus")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or _Result())
+
+    notify.withdraw(27)
+    assert "org.freedesktop.Notifications.CloseNotification" in calls[0]
+    assert "27" in calls[0]
+    print("✅ test_a_notification_can_be_withdrawn passed")
+
+
+def test_close_forgets_the_id_so_the_next_one_is_new():
+    """Whatever was on screen is gone, so the next notification must not be
+    posted as a replacement of something that no longer exists."""
+    withdrawn = []
+    notifier = notify.Notifier(enabled=True,
+                               sender=lambda *a, **k: 42)
+    notifier.notify("Syncing…")
+    assert notifier._id == 42
+    notifier.close(withdrawer=withdrawn.append)
+    assert withdrawn == [42]
+    assert notifier._id == 0
+    print("✅ test_close_forgets_the_id_so_the_next_one_is_new passed")
+
+
+def test_closing_without_a_notification_does_nothing():
+    withdrawn = []
+    notify.Notifier(enabled=True).close(withdrawer=withdrawn.append)
+    assert withdrawn == []
+    print("✅ test_closing_without_a_notification_does_nothing passed")

@@ -272,11 +272,29 @@ class Automator:
     def _notify_finished(self, result: dict) -> None:
         """Replace the "started" notification with what the run achieved.
 
+        **A run that changed nothing says nothing.** Most scheduled runs over
+        stable folders move no files, and a daily "0 transferred" is the kind
+        of noise that teaches people to ignore — or switch off — the channel
+        that also carries "your scheduled sync didn't run". The reassurance
+        that automatic syncing is alive is available on demand in `nasync
+        status` and in the app; it does not need to interrupt.
+
+        The "Syncing…" banner is already up by this point, so a quiet run
+        *withdraws* it rather than leaving it there for good.
+
         Errors are left at normal urgency: a couple of files that didn't copy
         say so in the summary, but they don't warrant a notification that sits
         on screen until dismissed the way a run that never happened does.
         """
         problems = result.get("failed", 0) + result.get("errors", 0)
+        # `unsupported` counts as worth mentioning: those files were skipped
+        # because SMB rejects their names, which is a thing to act on rather
+        # than a quiet success.
+        moved = (result.get("transferred", 0) + result.get("deleted", 0)
+                 + result.get("unsupported", 0))
+        if not moved and not problems:
+            self._notifier.close()
+            return
         counts = "  ·  ".join([
             f"{result.get('transferred', 0)} transferred",
             f"{result.get('skipped', 0)} unchanged",

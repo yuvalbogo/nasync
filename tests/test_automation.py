@@ -703,3 +703,90 @@ def test_a_server_automated_while_running_is_picked_up(monkeypatch):
 
         assert "work" in seen, seen
         print("✅ test_a_server_automated_while_running_is_picked_up passed")
+
+
+# --------------------------------------------------------------------------- #
+# A run that changed nothing says nothing (0.18.1)
+# --------------------------------------------------------------------------- #
+_NOTHING_CHANGED = {"ok": 1, "failed": 0, "cancelled": False, "transferred": 0,
+                    "skipped": 2257, "deleted": 0, "errors": 0, "unsupported": 0}
+
+
+def _quiet_automator(config, recording_notifier):
+    return Automator(reporter=lambda _m: None, config=config,
+                     notifier=recording_notifier)
+
+
+def test_a_run_that_moved_nothing_notifies_nothing(monkeypatch,
+                                                   recording_notifier):
+    """Most scheduled runs over stable folders move no files. A daily
+    "0 transferred" is the noise that teaches people to ignore the channel that
+    also carries "your scheduled sync didn't run"."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result=_NOTHING_CHANGED)
+
+        automator = _quiet_automator(config, recording_notifier)
+        assert automator.sync_now("scheduled 02:00", scheduled=True) is True
+
+        summaries = [sent[0] for sent in recording_notifier.sent]
+        assert not any("complete" in s.lower() for s in summaries), summaries
+        print("✅ test_a_run_that_moved_nothing_notifies_nothing passed")
+
+
+def test_the_syncing_banner_is_withdrawn_when_nothing_changed(monkeypatch,
+                                                              recording_notifier):
+    """"Syncing…" is posted before the run, so a quiet run has to take it back
+    rather than leave it on screen for good."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result=_NOTHING_CHANGED)
+
+        _quiet_automator(config, recording_notifier).sync_now("scheduled 02:00",
+                                                              scheduled=True)
+        assert len(recording_notifier.withdrawn) == 1, "the banner was left up"
+        print("✅ test_the_syncing_banner_is_withdrawn_when_nothing_changed passed")
+
+
+def test_a_run_that_moved_something_still_reports(monkeypatch,
+                                                  recording_notifier):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)          # the default result transfers 3
+
+        _quiet_automator(config, recording_notifier).sync_now("file changed")
+        summaries = [sent[0] for sent in recording_notifier.sent]
+        assert any("complete" in s.lower() for s in summaries), summaries
+        print("✅ test_a_run_that_moved_something_still_reports passed")
+
+
+def test_a_quiet_run_with_failures_still_reports(monkeypatch,
+                                                 recording_notifier):
+    """Nothing got through, but something went wrong — silence would be the
+    failure this module exists to prevent."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result={**_NOTHING_CHANGED, "errors": 2})
+
+        _quiet_automator(config, recording_notifier).sync_now("file changed")
+        summaries = [sent[0] for sent in recording_notifier.sent]
+        assert any("error" in s.lower() for s in summaries), summaries
+        print("✅ test_a_quiet_run_with_failures_still_reports passed")
+
+
+def test_deletions_alone_are_worth_reporting(monkeypatch, recording_notifier):
+    """Mirror mode removing files on the server is the most consequential thing
+    an unattended run does, even when it uploaded nothing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result={**_NOTHING_CHANGED, "deleted": 4})
+
+        _quiet_automator(config, recording_notifier).sync_now("scheduled 02:00")
+        summaries = [sent[0] for sent in recording_notifier.sent]
+        assert any("complete" in s.lower() for s in summaries), summaries
+        print("✅ test_deletions_alone_are_worth_reporting passed")
