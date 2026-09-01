@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.1] - 2026-09-01
+
+### Fixed
+- **A machine left alone came back to a column of notifications.** 0.19.0
+  batched the runs *within* a burst of file activity, which was not enough: a
+  laptop sitting idle produces dozens of separate bursts, and each still posted
+  its own "2 transferred". Two things caused the pile-up, and both are fixed.
+
+  **Replacing by id silently stopped replacing.** A notification is replaced
+  only while the daemon still knows its id, and it stops knowing once the
+  banner expires — so a "replace" issued minutes later posted a *new*
+  notification and left the old entry in the tray. Each notification now
+  withdraws its predecessor explicitly, so NASync occupies exactly one slot
+  however long the service has been running. Confirmed on the bus: twelve
+  summaries posted, eleven withdrawn, one on screen.
+
+  **Totals now accumulate across bursts, not just within one.** What arrives is
+  a single running summary of the whole episode — `340 transferred · 12 syncs`
+  — rather than one announcement per burst. A gap of four hours retires the
+  episode so the count starts fresh rather than climbing forever, and the
+  "Syncing…" placeholder no longer reappears over a summary that is already on
+  screen.
+
 ## [0.19.0] - 2026-08-30
 
 ### Added

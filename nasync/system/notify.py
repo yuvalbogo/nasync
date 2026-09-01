@@ -194,9 +194,10 @@ class Notifier:
     notifications setting switches off.
     """
 
-    def __init__(self, enabled: bool = True, sender=send):
+    def __init__(self, enabled: bool = True, sender=send, withdrawer=withdraw):
         self.enabled = enabled
         self._send = sender
+        self._withdraw = withdrawer
         self._id = 0
 
     def notify(self, summary: str, body: str = "", urgency: str = "normal") -> int:
@@ -208,12 +209,22 @@ class Notifier:
         """
         if not self.enabled:
             return 0
-        new_id = self._send(summary, body, urgency, self._id)
+        # Take the previous one down before posting the next. Replacing by id
+        # only works while the daemon still knows that id, and it stops knowing
+        # once the banner expires — which anything posted minutes ago has. A
+        # "replace" of a forgotten id posts a *new* notification and leaves the
+        # old entry sitting in the tray, so a laptop left alone for a few hours
+        # was found with a column of them. Withdrawing first means NASync
+        # occupies exactly one slot however long it has been running.
+        if self._id:
+            self._withdraw(self._id)
+            self._id = 0
+        new_id = self._send(summary, body, urgency, 0)
         if new_id:
             self._id = new_id
         return new_id
 
-    def close(self, withdrawer=withdraw) -> None:
+    def close(self, withdrawer=None) -> None:
         """Retract this notifier's current notification, if it has one.
 
         Forgets the id either way: whatever was on screen is gone, so the next
@@ -221,5 +232,5 @@ class Notifier:
         that is no longer there.
         """
         if self._id and self.enabled:
-            withdrawer(self._id)
+            (withdrawer or self._withdraw)(self._id)
         self._id = 0

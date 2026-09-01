@@ -114,6 +114,13 @@ class Automator:
     # of "1 transferred" banners. The syncing itself stays prompt; only the
     # telling waits, and what it then says covers everything that happened.
     NOTIFY_QUIET_SECONDS = 20.0
+    # How long a gap makes the *next* sync a new episode rather than more of
+    # the same one. Batching inside a burst was not enough: a laptop left alone
+    # runs dozens of separate bursts, and each posted its own notification, so
+    # coming back to it meant a column of them. Totals now accumulate across
+    # bursts into one running summary — "12 syncs · 340 transferred" — until a
+    # gap this long says the episode is over and the next one starts fresh.
+    NOTIFY_SESSION_SECONDS = 4 * 3600.0
 
     def __init__(self, reporter=print, config=None, notifier=None,
                  server: str = None, sync_lock=None):
@@ -147,6 +154,10 @@ class Automator:
         self._pending = None
         self._notify_timer = None
         self._notify_lock = threading.Lock()
+        # Totals for the whole episode, surviving across bursts, and when they
+        # were last shown. `None` means nothing is being reported right now.
+        self._session = None
+        self._session_at = 0.0
 
     # ------------------------------------------------------------------ #
     # Syncing
@@ -289,7 +300,10 @@ class Automator:
         be the same flood in a different order.
         """
         with self._notify_lock:
-            if self._pending is not None:
+            # Mid-burst, or mid-episode with a summary already on screen: the
+            # slot is in use and saying "Syncing…" again would replace a real
+            # total with a placeholder, over and over, all day.
+            if self._pending is not None or self._session is not None:
                 return
         self._notifier.notify(
             "Syncing…",
@@ -346,20 +360,36 @@ class Automator:
             self._notify_timer.start()
 
     def flush_notification(self) -> None:
-        """Send the accumulated summary now, if there is one.
+        """Report everything this episode has done, in one notification.
 
         Called by the quiet timer, and directly on shutdown — a service being
         stopped mid-burst should still say what it moved rather than swallowing
         it.
+
+        The totals are cumulative across bursts, not just across the runs in
+        one. A machine left alone syncs in dozens of separate bursts, and one
+        notification apiece is what filled the tray; this keeps a single
+        running summary instead, which the notifier posts into a single slot.
+        A gap of `NOTIFY_SESSION_SECONDS` retires the episode so the count does
+        not run forever.
         """
         with self._notify_lock:
-            totals = self._pending
+            pending = self._pending
             self._pending = None
             if self._notify_timer is not None:
                 self._notify_timer.cancel()
                 self._notify_timer = None
-        if not totals:
-            return
+            if not pending:
+                return
+
+            now = time.monotonic()
+            if (self._session is None
+                    or now - self._session_at > self.NOTIFY_SESSION_SECONDS):
+                self._session = dict.fromkeys(pending, 0)
+            for key, value in pending.items():
+                self._session[key] += value
+            self._session_at = now
+            totals = dict(self._session)
 
         problems = totals["failed"] + totals["errors"]
         counts = "  ·  ".join([
@@ -368,7 +398,7 @@ class Automator:
             f"{totals['deleted']} removed",
         ])
         # Only worth saying how many runs it took when it was more than one:
-        # "in 7 syncs" explains a number that would otherwise look like a
+        # "in 12 syncs" explains a number that would otherwise look like a
         # single improbably large transfer.
         runs = f"  ·  {totals['runs']} syncs" if totals["runs"] > 1 else ""
         self._notifier.notify(

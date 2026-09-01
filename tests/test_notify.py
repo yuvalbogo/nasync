@@ -92,21 +92,36 @@ def test_critical_notifications_stay_until_dismissed(monkeypatch):
     print("✅ test_critical_notifications_stay_until_dismissed passed")
 
 
-def test_a_run_occupies_one_notification_that_updates(monkeypatch):
-    """Otherwise a service syncing all day fills the tray with its own
-    history, and a stale 'Syncing…' sits there forever."""
-    sent = []
+def test_a_run_occupies_one_notification_that_updates():
+    """Otherwise a service syncing all day fills the tray with its own history.
+
+    The previous notification is *withdrawn* rather than replaced by id:
+    replacing only works while the daemon still knows the id, and it stops
+    knowing once the banner expires. A replace of a forgotten id posts a new
+    notification and leaves the old one in the tray — which is how a laptop
+    left alone for hours came back to a column of them.
+    """
+    sent, withdrawn = [], []
 
     def fake_send(summary, body="", urgency="normal", replaces=0, **kwargs):
         sent.append((summary, replaces))
         return 42
 
-    notifier = notify.Notifier(sender=fake_send)
+    notifier = notify.Notifier(sender=fake_send, withdrawer=withdrawn.append)
     notifier.notify("Syncing…", "nas")
     notifier.notify("Sync complete", "12 transferred")
 
-    assert sent == [("Syncing…", 0), ("Sync complete", 42)]
+    assert sent == [("Syncing…", 0), ("Sync complete", 0)]
+    assert withdrawn == [42], withdrawn      # the first one was taken down
     print("✅ test_a_run_occupies_one_notification_that_updates passed")
+
+
+def test_nothing_is_withdrawn_when_there_is_nothing_up():
+    withdrawn = []
+    notify.Notifier(sender=lambda *a, **k: 7,
+                    withdrawer=withdrawn.append).notify("first")
+    assert withdrawn == []
+    print("✅ test_nothing_is_withdrawn_when_there_is_nothing_up passed")
 
 
 def test_the_switch_turns_the_whole_thing_off():

@@ -59,6 +59,12 @@ class RecordingNotifier:
     def notify(self, summary, body="", urgency="normal"):
         if not self.enabled:
             return 0
+        # The real notifier takes the previous notification down before posting
+        # the next, so that NASync occupies one tray slot however long it runs.
+        # A double that only records sends would let a test claim that holds
+        # while the production path piled them up.
+        if self.sent:
+            self.withdrawn.append(self.sent[-1])
         self.sent.append((summary, body, urgency))
         return 1
 

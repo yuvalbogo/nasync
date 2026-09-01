@@ -878,3 +878,79 @@ def test_the_syncing_banner_is_not_reposted_during_a_burst(monkeypatch,
             automator.sync_now("file changed")
         assert [s[0] for s in recording_notifier.sent].count("Syncing…") == 1
         print("✅ test_the_syncing_banner_is_not_reposted_during_a_burst passed")
+
+
+def test_a_laptop_left_alone_comes_back_to_one_notification(monkeypatch,
+                                                            recording_notifier):
+    """The bug this closes: batching within a burst still left one notification
+    *per burst*, and a machine left alone runs dozens. Coming back to it meant a
+    column of "1 transferred" banners rather than one summary of the day."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result={"ok": 1, "failed": 0, "transferred": 2,
+                                          "skipped": 0, "deleted": 0,
+                                          "errors": 0, "unsupported": 0})
+        automator = _quiet_automator(config, recording_notifier)
+
+        # Twelve separate bursts, each flushing as its own quiet timer would.
+        for _ in range(12):
+            automator.sync_now("file changed")
+            automator.flush_notification()
+
+        summaries = [s[0] for s in recording_notifier.sent]
+        # One "Syncing…" at the very start, then summaries that each replace
+        # the last — never twelve independent announcements.
+        assert summaries.count("Syncing…") == 1, summaries
+        assert all(s in ("Syncing…", "Sync complete") for s in summaries)
+
+        body = recording_notifier.sent[-1][1]
+        assert "24 transferred" in body, body     # cumulative, not per burst
+        assert "12 syncs" in body, body
+        print("✅ test_a_laptop_left_alone_comes_back_to_one_notification passed")
+
+
+def test_only_one_notification_is_ever_on_screen(monkeypatch,
+                                                 recording_notifier):
+    """Each summary withdraws the one before it, so the tray holds one entry
+    however long the service has been running."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)
+        automator = _quiet_automator(config, recording_notifier)
+
+        for _ in range(5):
+            automator.sync_now("file changed")
+            automator.flush_notification()
+
+        # The double counts what the real notifier does: every post after the
+        # first takes its predecessor down.
+        assert len(recording_notifier.withdrawn) >= 4, recording_notifier.withdrawn
+        print("✅ test_only_one_notification_is_ever_on_screen passed")
+
+
+def test_a_long_gap_starts_the_count_again(monkeypatch, recording_notifier):
+    """Otherwise the running total never resets and a week later reads as one
+    absurd sync."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result={"ok": 1, "failed": 0, "transferred": 3,
+                                          "skipped": 0, "deleted": 0,
+                                          "errors": 0, "unsupported": 0})
+        automator = _quiet_automator(config, recording_notifier)
+
+        automator.sync_now("file changed")
+        automator.flush_notification()
+        assert "3 transferred" in recording_notifier.sent[-1][1]
+
+        # Pretend the machine sat idle past the session window.
+        automator._session_at -= automator.NOTIFY_SESSION_SECONDS + 1
+        automator.sync_now("file changed")
+        automator.flush_notification()
+
+        body = recording_notifier.sent[-1][1]
+        assert "3 transferred" in body, body      # a fresh episode, not 6
+        assert "syncs" not in body, body
+        print("✅ test_a_long_gap_starts_the_count_again passed")

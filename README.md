@@ -384,10 +384,12 @@ Notifications go through your desktop's notification portal inside a Flatpak,
 and `gdbus` (part of glib2) or `notify-send` elsewhere. `nasync notifications
 --test` names which one it used.
 
-**One notification per burst, not per file.** Live sync fires once per lull in
-file activity, so copying a folder in runs several syncs; their results are
-batched and reported together once things settle, rather than one banner per
-run.
+**One notification, not a pile.** Live sync fires once per lull in file
+activity, so copying a folder in runs several syncs — and a machine left alone
+runs many such bursts. Their totals accumulate into a single running summary
+(*340 transferred · 12 syncs*) that replaces itself, so NASync occupies one
+slot in the tray however long it has been running. A gap of a few hours starts
+the count fresh.
 
 **A sync that changed nothing doesn't notify.** A run reports when it moved
 files, removed them, or hit errors, and a scheduled run that couldn't happen
