@@ -220,7 +220,26 @@ and overwrites local files; local files the server doesn't have are left alone.
 
 **What mirror can delete is bounded by the [sync root](#the-sync-root)** — it
 only ever removes things inside that folder, so anything beside it on the share
-is out of reach. Check what a switch to mirror would do before making it:
+is out of reach.
+
+**Mirror refuses runs that look like a mistake** (since 0.20.0):
+
+- **An empty local folder is never mirrored** onto a server folder that has
+  files. It almost always means the folder moved, a disk didn't mount, or a
+  pair points at the wrong place — and the price of being wrong is the whole
+  backup. Nothing is changed; the run says why.
+- **Deleting more than half of a folder's server files** (and at least 50 of
+  them) waits for a yes. `nasync sync` asks; the desktop app shows a
+  *Delete files on the server?* dialog whose default keeps them; the
+  background service holds the run back and sends a *Sync held back*
+  notification. To say yes from a script: `nasync sync --allow-mass-delete`.
+- **Each pair needs a server folder of its own.** Two pairs pointing at the
+  same folder — or one inside the other — would each delete the other's files
+  on every mirror run, so adding or editing such a pair is refused. Pairs
+  like that in an older config are skipped by sync, and flagged by
+  `nasync list`, `nasync status` and the app, until they're pointed apart.
+
+Check what a switch to mirror would do before making it:
 
 ```bash
 nasync sync --dry-run --mode mirror    # lists every file it would delete
@@ -296,6 +315,25 @@ A run that couldn't happen — machine asleep, or away from home — isn't lost.
 The day's sync stays due until it succeeds, so it catches up on wake or on
 getting home, rather than waiting another 24 hours.
 
+### One sync at a time — and you can see it
+
+The background service, the desktop app and the `nasync` command are separate
+programs, but only one of them syncs at a time: a second sync started while
+one is running is refused with a message saying who is running it. Open the
+app during a background sync and it shows it — *Background sync running…*,
+which folder it is on, and a progress bar — with **Cancel** stopping it. When
+it finishes, the app says what it did, and the line above **Sync** keeps
+saying when the last sync ran and what it moved, whoever ran it.
+
+```bash
+nasync status    # "Syncing now — started by the background service …"
+nasync cancel    # stop whichever sync is running
+```
+
+Live sync never drops a change: an edit made while another sync is running,
+or while you're away from the NAS's network, is remembered and synced as soon
+as it can be.
+
 ### The background service
 
 Automation that needs the app to be open isn't automation, so turning either
@@ -317,7 +355,7 @@ can revoke the permission at any time in your desktop's Settings, under
 **Applications ▸ NASync**.
 
 ```bash
-nasync service status      # is it installed and running?
+nasync service status      # is it installed and running — and can it start?
 nasync service off         # pause automatic syncing entirely
 nasync service on
 nasync service restart
@@ -328,6 +366,11 @@ in Settings ▸ Automatic). Turning it off keeps live sync and the schedule
 configured but stops anything from running them — automatic syncing pauses
 rather than being reset. The desktop app shows that state as **Paused**, so
 it's clear the triggers are set up and deliberately not running.
+
+If the service points at a copy of NASync that no longer runs — the checkout
+was moved, or a distribution upgrade replaced the Python its virtualenv was
+built on — `nasync service status` says so, and opening the desktop app
+repairs it (and the app launcher) automatically.
 
 The service is also removed when you turn the last trigger off, so nothing
 idles in the background. Settings changes are picked up by a running service
@@ -853,7 +896,8 @@ nasync sync
 | `nasync add <local> <server> [--server NAME]` | Add a sync pair to a server |
 | `nasync list [--all] [--server NAME]` | Show a server's sync pairs |
 | `nasync remove <name> [--server NAME]` | Remove a sync pair |
-| `nasync sync [--pair NAME] [--mode mirror\|update]` | Incremental sync to server |
+| `nasync sync [--pair NAME] [--mode mirror\|update] [--allow-mass-delete]` | Incremental sync to server |
+| `nasync cancel` | Stop the sync that is running, wherever it was started |
 | `nasync root [PATH] [--server NAME]` | Show or set a server's [sync root](#the-sync-root) |
 | `nasync mode [mirror\|update] [--server NAME]` | Show or set a server's [sync mode](#sync-mode) |
 | `nasync restore [--pair NAME]` | Restore from server (never deletes locally) |
@@ -866,12 +910,22 @@ nasync sync
 
 ## How It Works
 
-- **Push (sync)** — *incremental*: only new or changed files are uploaded, and
-  unchanged files (matched by size) are skipped. Whether files removed locally
+- **Push (sync)** — *incremental*: only new or changed files are uploaded,
+  and unchanged ones are skipped. A file has changed when its size differs or
+  the local copy is newer than the server's — so an edit that keeps the file
+  the same length is caught too (before 0.20.0, size alone decided, and such
+  edits never reached the backup). Uploads carry the local modification time
+  onto the server; files uploaded by older versions get theirs recorded once,
+  on the first sync, without being sent again. Whether files removed locally
   are also removed on the server depends on the [sync mode](#sync-mode):
   **mirror** (default) deletes them, **update** keeps them.
-- **Pull (restore)**: downloads files from the server that are missing or
-  differ locally. It never deletes local files, in either mode.
+- **Renames are renames.** A folder you rename is moved on the server rather
+  than uploaded again in full and deleted, and a file renamed only in letter
+  case (`img.jpg` → `IMG.jpg`) is renamed rather than deleted — SMB shares
+  treat those as the same name.
+- **Pull (restore)**: downloads files from the server that are missing, a
+  different size, or newer there. A local copy newer than the server's is
+  left alone, and nothing local is ever deleted, in either mode.
 - **Automation**: [live sync](#live-sync) reacts to file changes (only on the
   server's network) and [scheduled sync](#scheduled-sync) runs once a day, both
   in whichever sync mode is set, run by a systemd user service

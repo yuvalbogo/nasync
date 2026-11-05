@@ -88,6 +88,9 @@ def test_status_says_so_when_nothing_is_available(monkeypatch):
 def test_status_distinguishes_installed_from_running(monkeypatch, isolated):
     _use(monkeypatch, service.SYSTEMD)
     monkeypatch.setattr(service, "is_active", lambda: False)
+    # Whether the program the unit points at runs is this machine's business;
+    # here it does. The broken case has a test of its own.
+    monkeypatch.setattr(service, "exec_problem", lambda path: None)
 
     assert "Not installed" in service.status()["detail"]
 
@@ -279,3 +282,42 @@ def test_partial_grant_is_reported_rather_than_treated_as_success(
     with pytest.raises(PermissionError, match="won't resume"):
         service._install_portal(config)
     assert config.get_portal_grant()["autostart"] is False
+
+
+def test_a_unit_pointing_at_a_moved_install_says_so(monkeypatch, isolated):
+    """A checkout moved from ~/Programming to ~/Projects left the service
+    failing every 30 seconds, silently, with the status saying only
+    "not running"."""
+    _use(monkeypatch, service.SYSTEMD)
+    monkeypatch.setattr(service, "is_active", lambda: False)
+    monkeypatch.setattr(service, "_nasync_exec",
+                        lambda: str(isolated / "gone" / "nasync"))
+    service.write_unit()
+
+    state = service.status()
+    assert "can't start" in state["detail"], state
+    assert "no longer exists" in state["problem"], state
+    assert service.problem() == state["problem"]
+
+
+def test_repair_rewrites_a_broken_unit_only_when_one_was_wanted(monkeypatch,
+                                                                isolated):
+    _use(monkeypatch, service.SYSTEMD)
+    monkeypatch.setattr(service, "is_active", lambda: False)
+    monkeypatch.setattr(service, "_nasync_exec",
+                        lambda: str(isolated / "gone" / "nasync"))
+    service.write_unit()
+    calls = []
+    monkeypatch.setattr(service, "_install_systemd", lambda: calls.append(1))
+    real_problem = service.exec_problem
+    monkeypatch.setattr(service, "exec_problem",
+                        lambda path: None if path == "/working/nasync"
+                        else real_problem(path))
+
+    assert service.repair() is False, "nobody asked for background syncing"
+    config = Config()
+    config.set_automation(scheduled_sync=True, server="home")
+    config.set_automation(background=True)
+    assert service.repair() is False, "would repoint at another broken one"
+    monkeypatch.setattr(service, "_nasync_exec", lambda: "/working/nasync")
+    assert service.repair() is True and calls == [1]

@@ -5,7 +5,8 @@ Two independent triggers, both **off** by default, usable together:
   * **Live sync** — watch the local folders and sync shortly after edits
     settle, but only while this machine is on the same network as the server
     (see :mod:`nasync.lan`). Away from home the watcher keeps running and
-    simply doesn't fire, so coming home syncs whatever piled up.
+    remembers that something changed, so coming home syncs whatever piled up.
+    The same goes for an edit made while another sync was running.
 
   * **Scheduled sync** — sync once a day at a set time. A run that couldn't
     happen (machine asleep, or away from home) is not lost: the day's run stays
@@ -27,6 +28,8 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from nasync.system import lan
+from nasync.core import activity
+from nasync.core.activity import SyncBusy
 from nasync.core.config import Config
 from nasync.system.notify import Notifier
 from nasync.core.sync import Syncer
@@ -121,6 +124,10 @@ class Automator:
     # bursts into one running summary — "12 syncs · 340 transferred" — until a
     # gap this long says the episode is over and the next one starts fresh.
     NOTIFY_SESSION_SECONDS = 4 * 3600.0
+    # How soon to try again when a live-sync catch-up could not run because
+    # another sync was busy or the NAS was out of reach. Short: both clear up
+    # on their own, and the check itself costs a file read and a cached probe.
+    CATCH_UP_PAUSE = 5.0
 
     def __init__(self, reporter=print, config=None, notifier=None,
                  server: str = None, sync_lock=None):
@@ -158,6 +165,23 @@ class Automator:
         # were last shown. `None` means nothing is being reported right now.
         self._session = None
         self._session_at = 0.0
+        self._session_began = None
+        # Whether what NASync has on screen is its own "Syncing…" placeholder,
+        # the only notification a run that changed nothing may take back.
+        self._placeholder_up = False
+        # Refusals already announced today, so a held-back mirror run is said
+        # once rather than on every retry.
+        self._held_notice = None
+        # Live sync's memory. Every file event bumps `_changes_seen`; a sync
+        # that gets through records how far it got. Anything seen after a sync
+        # *started* is still owed one — including edits made while it ran,
+        # which until 0.20.0 found the lock busy and were simply dropped.
+        self._changes_lock = threading.Lock()
+        self._changes_seen = 0
+        self._changes_synced = 0
+        self._catch_up_at = None
+        #: Why the last `sync_now` didn't run: "busy", "away", or None.
+        self.last_skip = None
 
     # ------------------------------------------------------------------ #
     # Syncing
@@ -215,13 +239,17 @@ class Automator:
         discover when they need the backup.
         """
         if not self._sync_lock.acquire(blocking=False):
-            # Already syncing; this trigger is moot and the day's run is still
-            # due, so it'll be picked up on a later tick. Not worth reporting.
+            # Already syncing. Not lost: the day's run stays due, and a file
+            # change stays owed (see `on_files_changed`), so either is picked
+            # up on a later tick. Not worth reporting.
+            self.last_skip = "busy"
             return False
         try:
+            self.last_skip = None
             state = self.on_lan()
             self._report_lan_change(state)
             if not state:
+                self.last_skip = "away"
                 if scheduled:
                     # The detail is a callable so the guard can reject a repeat
                     # before it's computed: describing *why* we're off-network
@@ -229,15 +257,36 @@ class Automator:
                     # as long as the day's run stays due.
                     self._notify_scheduled_blocked("off-network", self._lan_reason)
                 return False
+            # The app or the CLI may be mid-run in another process. Checked
+            # before saying "Syncing…", so a skipped run posts nothing.
+            if activity.read_status(self.config.config_dir) is not None:
+                self.last_skip = "busy"
+                return False
+            with self._changes_lock:
+                started_at_change = self._changes_seen
             label = f" ({trigger})" if trigger else ""
             self._report(f"\n🔄 Auto-sync at {time.strftime('%H:%M:%S')}{label}")
             self._notify_started(trigger)
             # The Automator's Config, not a fresh one: `_settings_changed`
             # reloads it when the file changes, and a Syncer that built
             # its own would sync from the settings as they were at start.
-            result = Syncer(reporter=self._report, config=self.config,
-                            server=self.server).sync_pair(self._only_pair)
+            try:
+                result = Syncer(reporter=self._report, config=self.config,
+                                server=self.server, source="background",
+                                trigger=trigger or "automatic",
+                                ).sync_pair(self._only_pair)
+            except SyncBusy:
+                # Lost a race with another process starting at the same
+                # moment. Take the placeholder back and try again later.
+                self._take_back_placeholder()
+                self.last_skip = "busy"
+                return False
             self._notify_finished(result)
+            if result.get("cancelled"):
+                # Someone pressed Cancel. That is an answer, not a failure to
+                # retry in fifteen minutes behind their back.
+                self._mark_synced(started_at_change)
+                return True
             if not result.get("ok"):
                 # Nothing got through. Reported as such on the scheduled path so
                 # the day's run stays due, and announced under the once-a-day
@@ -252,6 +301,7 @@ class Automator:
             # A run got through, so the next failure is news again rather than
             # a repeat of one already announced.
             self._blocked_notice = None
+            self._mark_synced(started_at_change)
             return True
         except Exception as e:
             self._report(f"❌ {e}")
@@ -264,10 +314,47 @@ class Automator:
             if scheduled:
                 self._notify_scheduled_blocked(str(e))
             else:
-                self._notifier.notify("Sync failed", str(e), urgency="critical")
+                self._post("Sync failed", str(e), urgency="critical")
             return False
         finally:
             self._sync_lock.release()
+
+    # ------------------------------------------------------------------ #
+    # Live sync's memory of what is still owed
+    # ------------------------------------------------------------------ #
+    def on_files_changed(self) -> None:
+        """A watched folder settled after changing: note it, then try to sync.
+
+        Noted first, so that if the sync can't run now — another one is busy,
+        or the NAS is out of reach — the loop knows to come back for it.
+        """
+        with self._changes_lock:
+            self._changes_seen += 1
+        self.sync_now("file changed")
+
+    def _mark_synced(self, upto: int) -> None:
+        with self._changes_lock:
+            self._changes_synced = max(self._changes_synced, upto)
+        self._catch_up_at = None
+
+    def changes_pending(self) -> bool:
+        with self._changes_lock:
+            return self._changes_seen > self._changes_synced
+
+    def catch_up_due(self) -> bool:
+        """True when file changes are owed a sync and it is worth trying now."""
+        if not self.changes_pending() or self._sync_lock.locked():
+            return False
+        return self._catch_up_at is None or time.monotonic() >= self._catch_up_at
+
+    def catch_up(self) -> bool:
+        """Sync changes that an earlier trigger couldn't, backing off on failure."""
+        if self.sync_now("catch-up"):
+            return True
+        pause = (self.CATCH_UP_PAUSE if self.last_skip in ("busy", "away")
+                 else self.SCHEDULED_RETRY_SECONDS)
+        self._catch_up_at = time.monotonic() + pause
+        return False
 
     # ------------------------------------------------------------------ #
     # Notifications
@@ -292,6 +379,18 @@ class Automator:
     def _server_label(self) -> str:
         return self.server or self.config.get_active_server_name() or "your NAS"
 
+    def _post(self, summary: str, body: str = "", urgency: str = "normal",
+              placeholder: bool = False) -> None:
+        """Post through the notifier, remembering whether it's the placeholder."""
+        self._notifier.notify(summary, body, urgency=urgency)
+        self._placeholder_up = placeholder
+
+    def _take_back_placeholder(self) -> None:
+        """Withdraw "Syncing…" — and only that, never a real summary."""
+        if self._placeholder_up:
+            self._notifier.close()
+            self._placeholder_up = False
+
     def _notify_started(self, trigger: str) -> None:
         """Say a sync is under way — once per burst, not once per run.
 
@@ -300,14 +399,22 @@ class Automator:
         be the same flood in a different order.
         """
         with self._notify_lock:
+            # An episode that went quiet long ago is over. Until 0.20.0 this
+            # was only noticed when the *next summary* was built, so once any
+            # summary had been shown, "Syncing…" never appeared again for as
+            # long as the service ran.
+            if (self._session is not None
+                    and time.monotonic() - self._session_at
+                    > self.NOTIFY_SESSION_SECONDS):
+                self._session = None
             # Mid-burst, or mid-episode with a summary already on screen: the
             # slot is in use and saying "Syncing…" again would replace a real
             # total with a placeholder, over and over, all day.
             if self._pending is not None or self._session is not None:
                 return
-        self._notifier.notify(
-            "Syncing…",
-            f"{self._server_label()}  ·  started by {trigger or 'request'}")
+        self._post("Syncing…",
+                   f"{self._server_label()}  ·  started by {trigger or 'request'}",
+                   placeholder=True)
 
     def _notify_finished(self, result: dict) -> None:
         """Fold a run into the pending summary, and report once it goes quiet.
@@ -329,28 +436,46 @@ class Automator:
         turns out to have moved nothing *withdraws* it rather than leaving it.
         """
         problems = result.get("failed", 0) + result.get("errors", 0)
+        held = self._new_refusals(result)
+        if not held:
+            # A refusal already announced today is not news on its retry.
+            problems -= self._known_refusals(result)
         # `unsupported` counts as worth mentioning: those files were skipped
         # because SMB rejects their names, which is a thing to act on rather
         # than a quiet success.
         moved = (result.get("transferred", 0) + result.get("deleted", 0)
-                 + result.get("deleted_dirs", 0) + result.get("unsupported", 0))
-        if not moved and not problems:
+                 + result.get("deleted_dirs", 0) + result.get("unsupported", 0)
+                 + result.get("moved", 0))
+        if not moved and problems <= 0 and not held:
             with self._notify_lock:
                 idle = self._pending is None
+            # Only the placeholder is taken back. A run that changed nothing
+            # used to withdraw whatever was up — including the summary of the
+            # run before it, which then vanished from the tray.
             if idle:
-                self._notifier.close()
+                self._take_back_placeholder()
             return
 
         with self._notify_lock:
             if self._pending is None:
                 self._pending = dict.fromkeys(
                     ("transferred", "skipped", "deleted", "deleted_dirs",
-                     "errors", "failed", "unsupported"), 0)
+                     "moved", "errors", "failed", "unsupported"), 0)
                 self._pending["runs"] = 0
+                self._pending["held"] = []
             for key in self._pending:
-                if key != "runs":
+                if key == "skipped":
+                    # How many files were already in place is a fact about the
+                    # folder, not a quantity of work: the latest run's count is
+                    # the true one. Summed, it read "135 unchanged" for a
+                    # folder of 30 files.
+                    self._pending[key] = result.get(key, 0)
+                elif key not in ("runs", "held"):
                     self._pending[key] += result.get(key, 0)
+            self._pending["failed"] -= (0 if held
+                                        else self._known_refusals(result))
             self._pending["runs"] += 1
+            self._pending["held"].extend(held)
 
             if self._notify_timer is not None:
                 self._notify_timer.cancel()
@@ -385,26 +510,80 @@ class Automator:
             now = time.monotonic()
             if (self._session is None
                     or now - self._session_at > self.NOTIFY_SESSION_SECONDS):
-                self._session = dict.fromkeys(pending, 0)
+                self._session = {key: ([] if key == "held" else 0)
+                                 for key in pending}
+                self._session_began = time.time()
             for key, value in pending.items():
-                self._session[key] += value
+                if key == "skipped":
+                    self._session[key] = value
+                elif key == "held":
+                    self._session[key] = (value or self._session[key])
+                else:
+                    self._session[key] += value
             self._session_at = now
             totals = dict(self._session)
+            began = self._session_began
 
-        problems = totals["failed"] + totals["errors"]
-        counts = "  ·  ".join([
-            f"{totals['transferred']} transferred",
-            f"{totals['skipped']} unchanged",
-            f"{totals['deleted']} removed",
-        ])
-        # Only worth saying how many runs it took when it was more than one:
-        # "in 12 syncs" explains a number that would otherwise look like a
-        # single improbably large transfer.
-        runs = f"  ·  {totals['runs']} syncs" if totals["runs"] > 1 else ""
-        self._notifier.notify(
+        problems = max(0, totals["failed"]) + totals["errors"]
+        if totals["runs"] > 1:
+            # A running total of the episode, and said to be one. Each burst
+            # re-posts it, and without "since" a burst that deleted one file
+            # read "Sync complete · 30 transferred". Unchanged is left out: it
+            # describes one folder at one moment, not the episode.
+            parts = [f"{totals['transferred']} transferred",
+                     f"{totals['deleted']} removed"]
+            if totals["moved"]:
+                parts.append(f"{totals['moved']} moved")
+            parts.append(f"{totals['runs']} syncs since "
+                         f"{time.strftime('%H:%M', time.localtime(began))}")
+        else:
+            parts = [f"{totals['transferred']} transferred",
+                     f"{totals['skipped']} unchanged",
+                     f"{totals['deleted']} removed"]
+            if totals["moved"]:
+                parts.append(f"{totals['moved']} moved")
+        counts = "  ·  ".join(parts)
+        if totals["held"]:
+            # A mirror run held back is the one thing here that needs a
+            # person: it will not happen until someone says yes.
+            self._post("Sync held back — open NASync to review",
+                       f"{self._server_label()}  ·  {totals['held'][0]}"
+                       + (f"  (+{len(totals['held']) - 1} more)"
+                          if len(totals["held"]) > 1 else ""),
+                       urgency="critical")
+            return
+        self._post(
             f"Sync finished with {problems} error(s)" if problems
             else "Sync complete",
-            f"{self._server_label()}  ·  {counts}{runs}")
+            f"{self._server_label()}  ·  {counts}")
+
+    def _refusal_key(self, result: dict):
+        held = sorted(r["pair"] for r in result.get("refused", [])
+                      if not r.get("dry_run"))
+        clashes = sorted(result.get("overlapping", []))
+        if not held and not clashes:
+            return None
+        return (datetime.date.today().isoformat(), tuple(held), tuple(clashes))
+
+    def _known_refusals(self, result: dict) -> int:
+        """Pairs in `result` held back for reasons already announced today."""
+        key = self._refusal_key(result)
+        if key is None or key != self._held_notice:
+            return 0
+        return len(key[1]) + len(key[2])
+
+    def _new_refusals(self, result: dict) -> list:
+        """Descriptions of held-back pairs not yet announced today."""
+        key = self._refusal_key(result)
+        if key is None or key == self._held_notice:
+            return []
+        self._held_notice = key
+        lines = [f"{r['pair']}: {r['message']}" for r in result.get("refused", [])
+                 if not r.get("dry_run")]
+        if result.get("overlapping"):
+            lines.append("skipped " + ", ".join(result["overlapping"])
+                         + " — they share a server folder")
+        return lines
 
     def _notify_scheduled_blocked(self, cause: str, detail=None) -> None:
         """Say once that today's scheduled sync couldn't run.
@@ -422,8 +601,7 @@ class Automator:
             return
         self._blocked_notice = key
         body = detail() if callable(detail) else (detail or cause)
-        self._notifier.notify("Scheduled sync didn't run", body,
-                              urgency="critical")
+        self._post("Scheduled sync didn't run", body, urgency="critical")
 
     # ------------------------------------------------------------------ #
     # Watching
@@ -439,7 +617,7 @@ class Automator:
         handlers = []
         for pair in self._watched_pairs():
             if os.path.isdir(pair["local"]):
-                handler = _DebouncedHandler(lambda: self.sync_now("file changed"),
+                handler = _DebouncedHandler(self.on_files_changed,
                                             debounce=self.DEBOUNCE)
                 handlers.append(handler)
                 observer.schedule(handler, pair["local"], recursive=True)
@@ -511,8 +689,12 @@ class Automator:
             self.config.record_scheduled_run(
                 datetime.date.today().isoformat(), server=self.server)
         else:
-            self._scheduled_retry_at = (time.monotonic()
-                                        + self.SCHEDULED_RETRY_SECONDS)
+            # Another sync being busy clears up by itself, usually within
+            # minutes; a NAS rejecting everything does not, and gets the
+            # longer pause.
+            pause = (self.CATCH_UP_PAUSE * 12 if self.last_skip == "busy"
+                     else self.SCHEDULED_RETRY_SECONDS)
+            self._scheduled_retry_at = time.monotonic() + pause
 
     def refresh_notifier(self) -> None:
         self._notifier.enabled = self.config.get_notifications()
@@ -714,6 +896,11 @@ class AutomationRunner:
                         # the user's, so don't spend the next tick reloading
                         # and resetting every interval timer because of it.
                         self._settings_changed()
+
+                    # Changes a watcher saw but couldn't sync — the NAS was
+                    # away, or another sync was running — are owed one now.
+                    if live and state.automator.catch_up_due():
+                        state.automator.catch_up()
 
                     if (state.next_interval_tick
                             and time.monotonic() >= state.next_interval_tick):

@@ -91,6 +91,10 @@ nasync add ~/Projects /code
 Pairs belong to the active server, so each NAS keeps its own list. Add to a
 different one with `--server NAME`, and see them all with `nasync list --all`.
 
+Give **each pair a server folder of its own** — `/docs` and `/downloads`, not
+`/backup` twice, and not `/backup` plus `/backup/photos`. In mirror mode two
+pairs sharing a folder would delete each other's files, so NASync refuses it.
+
 ### 3. View your configuration
 
 ```bash
@@ -139,6 +143,11 @@ nasync mode update       # only ever adds and updates; nothing is deleted
 In the desktop app: menu (⋯) → **Settings**. Restoring never deletes local
 files, in either mode. Not sure what a sync would do? `nasync sync --dry-run`
 lists it without transferring anything.
+
+Mirror won't run on an empty local folder (that's a folder that moved, not one
+you want wiped from the NAS), and asks before deleting more than half of a
+folder's server files. `nasync status` shows a sync in progress — from the
+background service too — and `nasync cancel` stops it.
 
 ### Automatic syncing
 

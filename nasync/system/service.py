@@ -35,7 +35,7 @@ from pathlib import Path
 
 from nasync.system import portal
 from nasync.core.config import Config
-from nasync.system.launcher import _nasync_exec
+from nasync.system.launcher import _nasync_exec, entry_exec, exec_problem
 
 SERVICE_NAME = "nasync-auto.service"
 
@@ -146,6 +146,42 @@ def is_active() -> bool:
     if backend() != SYSTEMD:
         return False
     return _systemctl("is-active", SERVICE_NAME).stdout.strip() == "active"
+
+
+def unit_exec():
+    """The program the installed unit runs, or None if there is no unit."""
+    try:
+        return entry_exec(unit_path().read_text())
+    except OSError:
+        return None
+
+
+def problem():
+    """Why an installed, stopped service can't start — or None.
+
+    A unit that points at a moved checkout, or at a virtualenv whose Python
+    the distribution upgraded, fails every thirty seconds forever and says
+    nothing anywhere a person looks. Only asked of a unit that isn't running:
+    one that is running plainly works.
+    """
+    if backend() != SYSTEMD or not unit_path().exists() or is_active():
+        return None
+    return exec_problem(unit_exec())
+
+
+def repair() -> bool:
+    """Rewrite a broken unit to run the program running now, and start it.
+
+    True when it repaired something. Only for a service someone asked for —
+    the settings still say background syncing is wanted — so this restores
+    what was set up rather than turning anything new on.
+    """
+    if not Config().background_service_wanted() or problem() is None:
+        return False
+    if exec_problem(_nasync_exec()) is not None:
+        return False                 # nothing better to point it at
+    _install_systemd()
+    return True
 
 
 def restart() -> None:
@@ -270,6 +306,14 @@ def status(config=None) -> dict:
         elif active:
             detail = "Running in the background, even when NASync is closed."
         else:
+            broken = exec_problem(unit_exec())
+            if broken:
+                detail = (f"Installed but can't start: {broken}. Turn background "
+                          f"syncing off and on again, or run 'nasync service "
+                          f"install', to repair it.")
+                return {"available": True, "backend": SYSTEMD,
+                        "installed": True, "active": False, "detail": detail,
+                        "problem": broken}
             detail = "Installed but not running. Check 'systemctl --user status " \
                      f"{SERVICE_NAME}'."
         return {"available": True, "backend": SYSTEMD, "installed": installed,

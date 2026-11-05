@@ -954,3 +954,163 @@ def test_a_long_gap_starts_the_count_again(monkeypatch, recording_notifier):
         assert "3 transferred" in body, body      # a fresh episode, not 6
         assert "syncs" not in body, body
         print("✅ test_a_long_gap_starts_the_count_again passed")
+
+
+# --------------------------------------------------------------------------- #
+# 0.20.0 — nothing a watcher saw is dropped, and the notifications say what
+# actually happened
+# --------------------------------------------------------------------------- #
+def _counting_syncer(monkeypatch, result=None):
+    import nasync.core.automation as automation_module
+    runs = []
+
+    class _FakeSyncer:
+        def __init__(self, *a, **k):
+            self.kwargs = k
+
+        def sync_pair(self, pair_name=None):
+            runs.append(self.kwargs.get("trigger"))
+            return dict(result or {"ok": 1, "failed": 0, "transferred": 1,
+                                   "skipped": 4, "deleted": 0, "errors": 0})
+
+    monkeypatch.setattr(automation_module, "Syncer", _FakeSyncer)
+    return runs
+
+
+def test_an_edit_made_during_another_sync_is_synced_afterwards(monkeypatch):
+    """It used to find the lock busy and be dropped until the next edit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        runs = _counting_syncer(monkeypatch)
+        automator = Automator(reporter=lambda _m: None, config=config)
+
+        automator._sync_lock.acquire()          # another server is syncing
+        automator.on_files_changed()
+        assert runs == [] and automator.changes_pending()
+        assert not automator.catch_up_due(), "must wait for the lock"
+        automator._sync_lock.release()
+
+        assert automator.catch_up_due()
+        assert automator.catch_up() is True
+        assert runs == ["catch-up"] and not automator.changes_pending()
+
+
+def test_coming_home_syncs_what_changed_while_away(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        home = {"here": False}
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: home["here"])
+        runs = _counting_syncer(monkeypatch)
+        automator = Automator(reporter=lambda _m: None, config=config)
+        automator.LAN_CACHE_TTL = 0
+
+        automator.on_files_changed()
+        assert runs == [] and automator.changes_pending()
+        assert automator.catch_up() is False
+        automator._catch_up_at = None           # skip the short pause
+        home["here"] = True
+        assert automator.catch_up() is True and runs == ["catch-up"]
+
+
+def test_a_sync_running_in_another_process_is_waited_for_silently(
+        monkeypatch, recording_notifier):
+    from nasync.core.activity import Activity
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        runs = _counting_syncer(monkeypatch)
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        with Activity(config.config_dir, source="app"):
+            automator.on_files_changed()
+        assert runs == [] and recording_notifier.sent == []
+        assert automator.last_skip == "busy" and automator.changes_pending()
+
+
+def test_a_run_that_changed_nothing_leaves_the_last_summary_up(
+        monkeypatch, recording_notifier):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        automator.sync_now("file changed")
+        automator.flush_notification()
+        withdrawn = len(recording_notifier.withdrawn)
+
+        _fake_syncer(monkeypatch, result=_NOTHING_CHANGED)
+        automator.sync_now("file changed")
+        assert len(recording_notifier.withdrawn) == withdrawn, \
+            "a quiet run took the previous summary off screen"
+
+
+def test_syncing_is_announced_again_once_an_episode_is_over(
+        monkeypatch, recording_notifier):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch)
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        automator.sync_now("scheduled 19:25")
+        automator.flush_notification()
+        automator._session_at -= automator.NOTIFY_SESSION_SECONDS + 1
+        automator.sync_now("scheduled 19:25")
+        titles = [s[0] for s in recording_notifier.sent]
+        assert titles.count("Syncing…") == 2, titles
+
+
+def test_an_episode_total_says_it_is_one_and_does_not_sum_unchanged(
+        monkeypatch, recording_notifier):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _counting_syncer(monkeypatch)       # 1 transferred, 4 unchanged each
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        for _ in range(5):
+            automator.sync_now("file changed")
+        automator.flush_notification()
+        body = recording_notifier.sent[-1][1]
+        assert "5 transferred" in body and "5 syncs since" in body, body
+        assert "20 unchanged" not in body, body
+
+
+def test_a_held_back_mirror_run_is_announced_once_as_needing_a_person(
+        monkeypatch, recording_notifier):
+    refused = {"ok": 0, "failed": 1, "cancelled": False, "transferred": 0,
+               "skipped": 0, "deleted": 0, "errors": 0,
+               "refused": [{"pair": "Programming", "confirmable": True,
+                            "message": "this would delete 23,000 of 23,000"}]}
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _fake_syncer(monkeypatch, result=refused)
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        automator.sync_now("scheduled 19:25")
+        automator.flush_notification()
+        title, body, urgency = recording_notifier.sent[-1]
+        assert title.startswith("Sync held back") and urgency == "critical"
+        assert "Programming" in body, body
+
+        posted = len(recording_notifier.sent)
+        automator.sync_now("catch-up")          # the same refusal, again
+        automator.flush_notification()
+        assert all(s[0] != "Sync held back — open NASync to review"
+                   for s in recording_notifier.sent[posted:]), \
+            "the same refusal was announced twice"
+
+
+def test_a_cancelled_background_run_is_not_retried_behind_the_users_back(
+        monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+        _counting_syncer(monkeypatch, result={"ok": 0, "failed": 0,
+                                              "cancelled": True})
+        automator = Automator(reporter=lambda _m: None, config=config)
+        automator.on_files_changed()
+        assert not automator.changes_pending()

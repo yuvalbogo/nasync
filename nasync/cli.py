@@ -3,6 +3,7 @@ import sys
 import click
 from getpass import getpass
 from nasync import __version__
+from nasync.core import activity
 from nasync.core.config import (SYNC_MODES, Config, join_remote,
                                 normalize_remote)
 from nasync.core.samba import SAMBAClient
@@ -256,12 +257,17 @@ def list_pairs(pair, server, show_all):
         if not pairs:
             click.echo("  No sync pairs yet.")
             continue
+        clashes = config.overlapping_pairs(name)
         for p in pairs:
             click.echo(f"  {p['name']}")
             click.echo(f"    Local:  {p['local']}")
             # The resolved path, not the stored one: where files actually land
             # is the thing worth checking before a mirror sync.
             click.echo(f"    Server: {share}:/{config.resolve_remote(p['server'], name)}")
+            if p["name"] in clashes:
+                click.echo(f"    ⚠️  Shares its server folder with "
+                           f"{', '.join(clashes[p['name']])} — skipped by sync "
+                           f"until each has its own (nasync remove/add).")
 
 
 @main.command()
@@ -279,19 +285,37 @@ def remove(name, server):
     click.echo(f"✅ Removed sync pair '{name}' from '{owner}'")
 
 
+def _finished(result: dict, verb: str) -> None:
+    """Say how a run ended — and not "completed!" over files that failed."""
+    problems = result.get("failed", 0) + result.get("errors", 0)
+    if result.get("cancelled"):
+        return
+    if problems:
+        click.echo(f"\n⚠️  {verb} finished with {problems} problem(s) — see above.")
+    else:
+        click.echo(f"\n✅ {verb} completed!")
+
+
 @main.command()
 @click.option("--pair", default=None, help="Specific pair name to sync")
 @click.option("--dry-run", is_flag=True, help="Show what would be synced without doing it")
 @click.option("--mode", type=click.Choice(SYNC_MODES), default=None,
               help="Override the saved sync mode for this run")
 @click.option("--no-delete", is_flag=True, help="Alias for --mode update")
-def sync(pair, dry_run, mode, no_delete):
+@click.option("--allow-mass-delete", is_flag=True,
+              help="Let a mirror run delete more than half of a folder's "
+                   "server files without asking")
+def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
     """Sync local directories to the server (incremental)
 
     Only new or changed files are uploaded and unchanged ones are skipped, in
     both modes. What differs is server-only files: 'mirror' deletes them so the
     server matches your folders exactly, 'update' leaves them in place. The
     saved default comes from 'nasync mode'.
+
+    A mirror run that would delete more than half of a folder's files on the
+    server (50 or more) stops and asks first; one whose local folder is empty
+    is never run at all.
     """
     if dry_run:
         click.echo("🔍 Dry-run mode (no files will be transferred)")
@@ -303,15 +327,43 @@ def sync(pair, dry_run, mode, no_delete):
     elif no_delete:
         mirror = False
 
-    syncer = Syncer()
     try:
-        result = syncer.sync_pair(pair, dry_run=dry_run, mirror=mirror)
+        result = Syncer(source="cli").sync_pair(
+            pair, dry_run=dry_run, mirror=mirror,
+            allow_mass_delete=allow_mass_delete)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
+
+    # A held-back mirror run is a question, so ask it — then run just those
+    # folders again with the answer.
+    held = [r for r in result.get("refused", [])
+            if r.get("confirmable") and not r.get("dry_run")]
+    if held and not dry_run:
+        click.echo("")
+        for r in held:
+            click.echo(f"🛑 '{r['pair']}' would delete {r['deletes']:,} of "
+                       f"{r['total']:,} file(s) on the server.")
+        if not sys.stdin.isatty():
+            click.echo("   Not asking without a terminal. Check with "
+                       "'nasync sync --dry-run', then run again with "
+                       "--allow-mass-delete.")
+        elif click.confirm("   Delete them? Check with --dry-run first if "
+                           "unsure", default=False):
+            for r in held:
+                try:
+                    again = Syncer(source="cli").sync_pair(
+                        r["pair"], mirror=mirror, allow_mass_delete=True)
+                except Exception as e:
+                    click.echo(f"❌ Error: {e}", err=True)
+                    raise SystemExit(1)
+                result["ok"] += again["ok"]
+                result["failed"] += again["failed"] - 1
+                result["errors"] += again["errors"]
     if result["failed"] and not result["ok"]:
+        _finished(result, "Sync")
         raise SystemExit(1)
-    click.echo("\n✅ Sync completed!")
+    _finished(result, "Sync")
 
 
 @main.command()
@@ -332,15 +384,31 @@ def restore(pair, dry_run, yes):
             click.echo("Cancelled.")
             return
 
-    syncer = Syncer()
     try:
-        result = syncer.restore_pair(pair, dry_run=dry_run)
+        result = Syncer(source="cli").restore_pair(pair, dry_run=dry_run)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
     if result["failed"] and not result["ok"]:
+        _finished(result, "Restore")
         raise SystemExit(1)
-    click.echo("\n✅ Restore completed!")
+    _finished(result, "Restore")
+
+
+@main.command()
+def cancel():
+    """Stop the sync that is running — in the background or anywhere else"""
+    config = Config()
+    status_now = activity.read_status(config.config_dir)
+    if status_now is None:
+        click.echo("Nothing is syncing right now.")
+        return
+    if activity.request_cancel(config.config_dir):
+        click.echo(f"⏹️  Asked it to stop: {activity.describe(status_now)}.")
+        click.echo("   It finishes the file it is on, then stops.")
+    else:
+        click.echo("❌ Couldn't reach the running sync.", err=True)
+        raise SystemExit(1)
 
 
 _MODE_HELP = {
@@ -772,6 +840,23 @@ def _describe_automation(config) -> list:
         lines.append(f"  Background:     {service.status()['detail']}")
     lines.append(f"  Notifications:  {_describe_notifications(config)}")
     return lines
+
+
+def _describe_activity(config) -> list:
+    """What is syncing now, or what synced last — from any process."""
+    running = activity.read_status(config.config_dir)
+    if running:
+        lines = [f"🔄 Syncing now — {activity.describe(running)}"]
+        if running.get("files_total"):
+            lines.append(f"   {running.get('verb', 'Working')} "
+                         f"{running.get('files_done', 0)}/{running['files_total']}"
+                         f" — {running.get('file', '')}")
+        lines.append("   Stop it with: nasync cancel")
+        return lines
+    last = activity.read_last(config.config_dir)
+    if not last:
+        return ["Last sync: none recorded yet"]
+    return [activity.describe_last(last)]
 
 
 def _describe_notifications(config) -> str:
@@ -1281,13 +1366,27 @@ def status():
     click.echo("\n  Sync pairs (each server has its own):")
     for s in servers:
         owned = config.get_pairs(s["name"])
+        clashes = config.overlapping_pairs(s["name"])
         mark = "●" if s["name"] == active else "○"
         click.echo(f"    {mark} {s['name']} ({len(owned)})")
         for p in owned:
             click.echo(f"        • {p['name']}: {p['local']} → "
                        f"{s['share']}:/{config.resolve_remote(p['server'], s['name'])}")
+            if p["name"] in clashes:
+                click.echo(f"          ⚠️  shares its server folder with "
+                           f"{', '.join(clashes[p['name']])} — skipped by sync")
         if not owned:
             click.echo("        ⚠️  none yet")
+
+    click.echo("")
+    for line in _describe_activity(config):
+        click.echo(f"  {line}")
+
+    from nasync.system import launcher
+    broken = launcher.problem()
+    if broken:
+        click.echo(f"\n  ⚠️  The app launcher won't open NASync: {broken}.")
+        click.echo("     Repair it with: nasync install-desktop")
 
 
 if __name__ == "__main__":

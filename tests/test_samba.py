@@ -50,6 +50,9 @@ class _FakeSMB:
         self._contents = contents or {}  # full UNC path -> bytes, for hashing
         self._volume = volume        # (total, caller_available, actual_available)
         self.removed = []
+        self.renamed = []
+        self.removed_dirs = []
+        self.stamped = {}            # UNC path -> (atime, mtime) set on it
         self.made_dirs = []
         self.written = {}
         self.scandir_calls = []
@@ -86,6 +89,15 @@ class _FakeSMB:
 
     def remove(self, path, **kwargs):
         self.removed.append(path)
+
+    def rename(self, src, dst, **kwargs):
+        self.renamed.append((src, dst))
+
+    def rmdir(self, path, **kwargs):
+        self.removed_dirs.append(path)
+
+    def utime(self, path, times=None, **kwargs):
+        self.stamped[path] = times
 
     def register_session(self, server, **kwargs):
         self.sessions.append({"server": server, **kwargs})
@@ -591,7 +603,7 @@ def test_colon_names_are_skipped_not_silently_truncated():
     """Samba turns 'note:x.txt' into 'note' and loses the contents — so a
     colon has to be caught here rather than shipped to the server."""
     client = _client(_FakeSMB())
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
+    client._remote_file_map = lambda base, **_: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "safe.txt").write_text("ok")
         Path(tmpdir, "note:stream.txt").write_text("would be lost")
@@ -605,7 +617,7 @@ def test_colon_names_are_skipped_not_silently_truncated():
 def test_legal_awkward_filenames_still_sync():
     """Apostrophes, spaces and unicode are legal and must not be filtered."""
     client = _client(_FakeSMB())
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
+    client._remote_file_map = lambda base, **_: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "has'apostrophe.txt").write_text("a")
         Path(tmpdir, "with space.txt").write_text("s")
@@ -622,7 +634,7 @@ def test_legal_awkward_filenames_still_sync():
 # --------------------------------------------------------------------------- #
 def test_push_dry_run_discovers_files():
     client = _client(_FakeSMB())
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}   # empty remote -> all new
+    client._remote_file_map = lambda base, **_: {}   # empty remote -> all new
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "a.txt").write_text("a")
         os.makedirs(os.path.join(tmpdir, "sub", "deep"))
@@ -643,7 +655,7 @@ def test_push_incremental_plan():
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "a.txt").write_text("aaaa")   # 4 bytes, unchanged remotely
         Path(tmpdir, "b.txt").write_text("bb")     # new
-        client._remote_file_map = lambda base, dirs=None, on_scan=None: {"a.txt": 4, "stale.txt": 9}
+        client._remote_file_map = lambda base, **_: {"a.txt": 4, "stale.txt": 9}
 
         stats = client.sync_directory(tmpdir, "/mir", direction="push", dry_run=True)
         assert stats["transferred"] == 1, stats   # only b.txt
@@ -667,7 +679,7 @@ def test_push_uploads_and_mirrors_deletes():
     """A real (faked) push writes changed files and removes server-only ones."""
     fake = _FakeSMB()
     client = _client(fake)
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {"stale.txt": 9}
+    client._remote_file_map = lambda base, **_: {"stale.txt": 9}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "new.txt").write_text("hello")
 
@@ -689,7 +701,7 @@ def test_directories_are_created_once_each_not_once_per_file():
     """
     fake = _FakeSMB()
     client = _client(fake)
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
+    client._remote_file_map = lambda base, **_: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         os.makedirs(os.path.join(tmpdir, "photos", "2024", "june"))
         for name in ("a.jpg", "b.jpg", "c.jpg"):
@@ -717,7 +729,7 @@ def test_push_in_update_mode_uploads_but_deletes_nothing():
     """Update mode still uploads; it just never removes server-only files."""
     fake = _FakeSMB()
     client = _client(fake)
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {"stale.txt": 9}
+    client._remote_file_map = lambda base, **_: {"stale.txt": 9}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "new.txt").write_text("hello")
 
@@ -736,7 +748,7 @@ def test_update_mode_dry_run_promises_no_deletes():
     """The dry run is what a user checks before trusting the mode."""
     lines = []
     client = _client(_FakeSMB(), reporter=lines.append)
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {"stale.txt": 9}
+    client._remote_file_map = lambda base, **_: {"stale.txt": 9}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "new.txt").write_text("hello")
 
@@ -755,7 +767,7 @@ def test_pull_skips_files_that_match_locally():
     client = _client(_FakeSMB())
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "same.txt").write_text("1234")     # 4 bytes, matches remote
-        client._remote_file_map = lambda base, dirs=None, on_scan=None: {"same.txt": 4, "missing.txt": 6}
+        client._remote_file_map = lambda base, **_: {"same.txt": 4, "missing.txt": 6}
 
         stats = client.sync_directory(tmpdir, "/base", direction="pull", dry_run=True)
         assert stats["skipped"] == 1, stats     # same.txt
@@ -799,7 +811,7 @@ def test_file_progress_signature_unchanged():
         _FakeSMB(),
         progress=lambda done, total, name, verb: seen.append((done, total, name, verb)),
     )
-    client._remote_file_map = lambda base, dirs=None, on_scan=None: {}
+    client._remote_file_map = lambda base, **_: {}
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "one.txt").write_text("x")
         client.sync_directory(tmpdir, "/base", direction="push")
@@ -835,3 +847,231 @@ if __name__ == "__main__":
     test_cancel_event_aborts_transfer()
     test_byte_progress_reports_incrementally()
     test_file_progress_signature_unchanged()
+
+
+# --------------------------------------------------------------------------- #
+# 0.20.0 — change detection and mirror safety
+#
+# Each of these reproduces something that went wrong on a real NAS: an edit
+# that never reached the backup, a renamed photo deleted from it, a renamed
+# folder copied over again in full, and a mirror run that deleted 57,000 files.
+# --------------------------------------------------------------------------- #
+from nasync.core.samba import MASS_DELETE_MIN, MirrorRefused  # noqa: E402
+
+
+def _local(entries):
+    """{rel: (size, mtime)} → the shape `_local_file_map` returns."""
+    return {rel: (f"/local/{rel}", size, mtime)
+            for rel, (size, mtime) in entries.items()}
+
+
+def _plan(local, remote, mtimes=None, dirs=None, mirror=True):
+    return SAMBAClient.plan_push(_local(local), remote, mtimes or {},
+                                 set(dirs or ()), mirror)
+
+
+def test_an_edit_that_keeps_the_size_is_still_uploaded():
+    """Size-only comparison missed every same-length edit, silently."""
+    plan = _plan({"notes.txt": (100, 2_000.0)}, {"notes.txt": 100},
+                 {"notes.txt": 1_000.0})
+    assert plan["upload"] == [("notes.txt", "notes.txt")], plan
+
+
+def test_an_older_upload_is_not_mistaken_for_a_change():
+    """Before 0.20.0 the server's time was the upload time — later than the
+    local edit. Treating "different" as "changed" would re-upload everything
+    once; it is unchanged, and gets the real time recorded instead."""
+    plan = _plan({"a.jpg": (5, 1_000.0)}, {"a.jpg": 5}, {"a.jpg": 9_000.0})
+    assert plan["upload"] == [] and plan["unchanged"] == ["a.jpg"], plan
+    assert plan["stamps"] == [("a.jpg", 1_000.0)], plan
+
+
+def test_times_within_the_slack_are_the_same_time():
+    plan = _plan({"a": (5, 1_001.5)}, {"a": 5}, {"a": 1_000.0})
+    assert plan["upload"] == [] and plan["stamps"] == [], plan
+
+
+def test_an_upload_carries_the_local_time_to_the_server():
+    fake = _FakeSMB()
+    client = _client(fake)
+    client._remote_file_map = lambda base, **_: {}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir, "doc.txt")
+        path.write_text("hello")
+        os.utime(path, (1_500_000_000, 1_500_000_000))
+        client.sync_directory(tmpdir, "/base", direction="push")
+    assert fake.stamped["\\\\1.2.3.4\\share\\base\\doc.txt"] == (
+        1_500_000_000, 1_500_000_000), fake.stamped
+
+
+def test_a_case_only_rename_renames_instead_of_deleting():
+    """img_09 → IMG_09 used to upload into the same file on a case-insensitive
+    share and then delete it, losing it from the backup until the next run."""
+    plan = _plan({"album/IMG_09.jpg": (7, 1.0)}, {"album/img_09.jpg": 7},
+                 {"album/img_09.jpg": 1.0}, dirs={"album"})
+    assert plan["delete"] == [], plan
+    assert plan["renames"] == [("album/img_09.jpg", "album/IMG_09.jpg")], plan
+    assert plan["upload"] == [], plan
+
+
+def test_a_case_only_rename_never_reaches_remove():
+    fake = _FakeSMB()
+    client = _client(fake)
+    client._remote_file_map = lambda base, **_: {"img_09.jpg": 4}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "IMG_09.jpg").write_text("abcd")
+        stats = client.sync_directory(tmpdir, "/base", direction="push")
+    assert fake.removed == [], fake.removed
+    assert fake.renamed == [("\\\\1.2.3.4\\share\\base\\img_09.jpg",
+                             "\\\\1.2.3.4\\share\\base\\IMG_09.jpg")], fake.renamed
+    assert stats["deleted"] == 0, stats
+
+
+def test_a_folder_whose_case_changed_is_left_alone_not_deleted():
+    plan = _plan({"photos/x.jpg": (3, 1.0)}, {"Photos/x.jpg": 3},
+                 {"Photos/x.jpg": 1.0}, dirs={"Photos"})
+    assert plan["delete"] == [] and plan["upload"] == [], plan
+    assert plan["stale"] == [], "the folder is not stale just for its casing"
+
+
+def test_a_renamed_folder_is_moved_on_the_server_not_copied_again():
+    local = {f"album_renamed/img_{i}.jpg": (100 + i, 50.0) for i in range(40)}
+    remote = {f"album/img_{i}.jpg": 100 + i for i in range(40)}
+    mtimes = {rel: 50.0 for rel in remote}
+    plan = _plan(local, remote, mtimes, dirs={"album"})
+    assert plan["upload"] == [] and plan["delete"] == [], plan
+    assert len(plan["moves"]) == 40, plan["moves"]
+    assert plan["stale"] == ["album"], plan
+
+
+def test_same_named_files_are_told_apart_by_their_folders():
+    """A renamed project folder is full of __init__.py — identical names that
+    only the path above them distinguishes."""
+    local = {"new/a/__init__.py": (10, 5.0), "new/b/__init__.py": (10, 5.0)}
+    remote = {"old/a/__init__.py": 10, "old/b/__init__.py": 10}
+    plan = _plan(local, remote, {r: 5.0 for r in remote})
+    assert sorted(plan["moves"]) == [("old/a/__init__.py", "new/a/__init__.py"),
+                                     ("old/b/__init__.py", "new/b/__init__.py")]
+
+
+def test_an_uncertain_match_is_uploaded_rather_than_moved():
+    """Without a matching time — every file uploaded before 0.20.0 — a match
+    could be wrong, and a wrong one would be recorded as unchanged forever."""
+    plan = _plan({"b/x.jpg": (9, 1_000.0)}, {"a/x.jpg": 9}, {"a/x.jpg": 8_000.0})
+    assert plan["moves"] == [], plan
+    assert plan["upload"] == [("b/x.jpg", "b/x.jpg")] and plan["delete"] == ["a/x.jpg"]
+
+
+def test_an_empty_local_folder_is_never_mirrored():
+    """~/Programming emptied by a move would have deleted ~23,000 files."""
+    fake = _FakeSMB()
+    client = _client(fake)
+    client._remote_file_map = lambda base, **_: {"keep.txt": 1, "also.txt": 2}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            client.sync_directory(tmpdir, "/base", direction="push",
+                                  allow_mass_delete=True)
+        except MirrorRefused as e:
+            assert not e.confirmable
+        else:
+            raise AssertionError("an empty source was mirrored")
+    assert fake.removed == [], fake.removed
+
+
+def test_a_mass_delete_waits_for_a_yes():
+    fake = _FakeSMB()
+    client = _client(fake)
+    remote = {f"f{i}.bin": 1 for i in range(MASS_DELETE_MIN * 2)}
+    client._remote_file_map = lambda base, **_: dict(remote)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "f0.bin").write_text("x")
+        try:
+            client.sync_directory(tmpdir, "/base", direction="push")
+        except MirrorRefused as e:
+            assert e.confirmable and e.deletes == len(remote) - 1, e
+        else:
+            raise AssertionError("a 99% delete went through unasked")
+        assert fake.removed == [] and fake.written == {}, "touched before refusing"
+
+        client.sync_directory(tmpdir, "/base", direction="push",
+                              allow_mass_delete=True)
+    assert len(fake.removed) == len(remote) - 1
+
+
+def test_small_or_partial_deletes_are_not_questioned():
+    few = _plan({"a": (1, 1.0)}, {"a": 1, "b": 1, "c": 1}, {"a": 1.0})
+    SAMBAClient.check_mirror(few, 1, 3)                       # 2 of 3: too few
+    local = {f"k{i}": (1, 1.0) for i in range(100)}
+    remote = {**{f"k{i}": 1 for i in range(100)}, **{f"d{i}": 1 for i in range(60)}}
+    some = _plan(local, remote, {r: 1.0 for r in remote})
+    SAMBAClient.check_mirror(some, len(local), len(remote))   # 60 of 160
+
+
+def test_a_dry_run_says_where_a_real_run_would_stop():
+    lines = []
+    client = _client(_FakeSMB(), reporter=lines.append)
+    client._remote_file_map = lambda base, **_: {"keep.txt": 1}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stats = client.sync_directory(tmpdir, "/base", direction="push",
+                                      dry_run=True)
+    assert stats["refused"], stats
+    assert any("would stop here" in line for line in lines), lines
+
+
+def test_leftover_empty_folders_go_even_when_nothing_else_changed():
+    """The "Already up to date" shortcut used to skip the folder cleanup, so
+    folders an older version left behind stayed until some file changed."""
+    fake = _FakeSMB()
+    client = _client(fake)
+
+    def remote(base, dirs=None, **_):
+        if dirs is not None:
+            dirs.update({"old_leftover", "old_leftover/inner"})
+        return {"a.txt": 1}
+
+    client._remote_file_map = remote
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "a.txt").write_text("x")
+        os.utime(Path(tmpdir, "a.txt"), (0, 0))
+        client.sync_directory(tmpdir, "/base", direction="push")
+    assert fake.removed_dirs == ["\\\\1.2.3.4\\share\\base\\old_leftover\\inner",
+                                 "\\\\1.2.3.4\\share\\base\\old_leftover"]
+
+
+def test_restore_fetches_a_same_size_file_that_is_newer_on_the_server():
+    client = _client(_FakeSMB())
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "old.txt").write_text("1234")
+        os.utime(Path(tmpdir, "old.txt"), (1_000, 1_000))
+        Path(tmpdir, "mine.txt").write_text("1234")
+        os.utime(Path(tmpdir, "mine.txt"), (9_000, 9_000))
+
+        def remote(base, mtimes=None, **_):
+            mtimes.update({"old.txt": 5_000.0, "mine.txt": 5_000.0})
+            return {"old.txt": 4, "mine.txt": 4}
+
+        client._remote_file_map = remote
+        lines = []
+        client._report = lines.append
+        stats = client.sync_directory(tmpdir, "/base", direction="pull",
+                                      dry_run=True)
+    assert any("↓ old.txt" in line for line in lines), lines
+    assert stats["skipped"] == 1, "a newer local copy must not be overwritten"
+
+
+def test_a_case_rename_the_server_refuses_goes_through_a_temporary_name():
+    """Samba answers ACCESS_DENIED to renaming img.jpg to IMG.jpg directly."""
+    fake = _FakeSMB()
+    first = []
+
+    def rename(src, dst, **kwargs):
+        if not first and dst.endswith("IMG.jpg"):
+            first.append(dst)
+            raise OSError("STATUS_ACCESS_DENIED")
+        fake.renamed.append((src, dst))
+
+    fake.rename = rename
+    client = _client(fake)
+    client._rename_case("\\\\s\\img.jpg", "\\\\s\\IMG.jpg")
+    temp = f"\\\\s\\img.jpg.nasync-case-{os.getpid()}"
+    assert fake.renamed == [("\\\\s\\img.jpg", temp), (temp, "\\\\s\\IMG.jpg")]

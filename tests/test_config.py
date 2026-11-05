@@ -808,3 +808,42 @@ def test_remote_paths_are_cleaned_the_way_people_type_them():
     # Backslashes too: someone reading a path off a Windows machine.
     assert normalize_remote(r"backups\\laptop") == "backups/laptop"
     print("✅ test_remote_paths_are_cleaned_the_way_people_type_them passed")
+
+
+# --------------------------------------------------------------------------- #
+# 0.20.0 — one server folder per pair
+# --------------------------------------------------------------------------- #
+def test_destinations_overlap_when_equal_or_nested_ignoring_case():
+    from nasync.core.config import destinations_overlap
+    assert destinations_overlap("various_dirs", "various_dirs")
+    assert destinations_overlap("Pictures", "pictures/backgrounds")
+    assert destinations_overlap("a/b/c", "A/B")
+    assert destinations_overlap("", "anything")            # the root holds all
+    assert not destinations_overlap("various_dirs/icons", "various_dirs/themes")
+    assert not destinations_overlap("Pictures", "Pictures2")
+
+
+def test_a_pair_cannot_share_or_nest_inside_another_pairs_folder(configured_config):
+    import pytest
+    config = configured_config                             # "pair" -> dest
+    for clash in ("dest", "/DEST/", "dest/inner", ""):
+        with pytest.raises(ValueError):
+            config.add_pair("/tmp", clash, f"x{len(clash)}")
+    config.add_pair("/tmp", "elsewhere", "fine")
+    assert [p["name"] for p in config.get_pairs()] == ["pair", "fine"]
+
+
+def test_editing_a_pair_does_not_clash_with_itself(configured_config):
+    import pytest
+    config = configured_config
+    config.add_pair("/tmp", "other", "second")
+    config.update_pair("pair", "/tmp", "dest", "pair")      # unchanged: fine
+    with pytest.raises(ValueError):
+        config.update_pair("second", "/tmp", "dest/sub", "second")
+
+
+def test_overlaps_already_in_an_old_config_are_found(configured_config):
+    config = configured_config
+    config.get_pairs().append({"name": "icons", "local": "/x", "server": "dest"})
+    config.get_pairs().append({"name": "ok", "local": "/y", "server": "apart"})
+    assert config.overlapping_pairs() == {"pair": ["icons"], "icons": ["pair"]}

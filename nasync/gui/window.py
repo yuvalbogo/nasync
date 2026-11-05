@@ -5,6 +5,7 @@ list of sync pairs that target whichever server is active, and a transfer
 area that reports progress and offers a cancel button while work is running.
 """
 
+import os
 import threading
 import time
 
@@ -15,6 +16,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
+from nasync.core import activity  # noqa: E402
 from nasync.core.config import Config  # noqa: E402
 from nasync.core.samba import SAMBAClient  # noqa: E402
 from nasync.core.sync import Syncer  # noqa: E402
@@ -24,6 +26,7 @@ from nasync.gui.dialogs import (AppSettingsDialog, AutomationRows,  # noqa: E402
                                 ServerInfoDialog, StorageDialog,  # noqa: E402
                                 SyncModeRow)
 from nasync.gui.threads import on_main, run_async  # noqa: E402
+from nasync.system import launcher, service  # noqa: E402
 from nasync.system.notify import Notifier  # noqa: E402
 
 #: How each mode is described where a run is about to happen:
@@ -74,6 +77,21 @@ def _confirm(parent, heading: str, body: str, verb: str, handler, *args) -> None
 _format_bytes = format_bytes
 
 
+def _merge_results(total, result):
+    """Add one Syncer result into a running total of several."""
+    if total is None:
+        return dict(result)
+    merged = dict(total)
+    for key, value in result.items():
+        if isinstance(value, bool):
+            merged[key] = merged.get(key, False) or value
+        elif isinstance(value, (int, float)):
+            merged[key] = merged.get(key, 0) + value
+        elif isinstance(value, list):
+            merged[key] = merged.get(key, []) + value
+    return merged
+
+
 class NasyncWindow(Adw.ApplicationWindow):
 
     #: Smallest gap between byte-progress repaints. No eye reads faster than
@@ -101,6 +119,10 @@ class NasyncWindow(Adw.ApplicationWindow):
         # For syncs the user walked away from; the window itself reports the
         # ones they stayed to watch.
         self._notifier = Notifier(enabled=self.config.get_notifications())
+        #: The sync another process is running, as last read — None when
+        #: nothing is. See `_poll_activity`.
+        self._bg_status = None
+        self._bg_cancelling = False
 
         self._toasts = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
@@ -157,6 +179,11 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._pair_groups = {}
         self._syncing_rows = []
         self.refresh_servers()
+        # What the background service (or the CLI) is doing, checked once a
+        # second. Until 0.20.0 the window had no way to know: a scheduled sync
+        # could be twenty minutes in while this said "Idle".
+        GLib.timeout_add_seconds(1, self._poll_activity)
+        self._repair_installs()
         self.refresh_summary()
 
     # ------------------------------------------------------------------ #
@@ -254,11 +281,24 @@ class NasyncWindow(Adw.ApplicationWindow):
             group.add(empty)
             rows.append(empty)
         else:
+            # Pairs sharing a server folder delete each other's files in mirror
+            # mode, so sync skips them; the row says why, so the skip is never
+            # a mystery found in a log.
+            clashes = self.config.overlapping_pairs(server_name)
             for pair in pairs:
                 row = Adw.ActionRow(title=pair["name"],
                                     subtitle=f"{pair['local']}  →  {pair['server']}")
                 row.set_subtitle_lines(1)
-                row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
+                if pair["name"] in clashes:
+                    row.set_subtitle(
+                        f"Skipped: shares its server folder with "
+                        f"{', '.join(clashes[pair['name']])}. Edit it to give "
+                        f"it a folder of its own.")
+                    row.set_subtitle_lines(2)
+                    row.add_css_class("error")
+                    row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+                else:
+                    row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
                 row.add_suffix(_icon_button(
                     "document-edit-symbolic", "Edit this pair",
                     self._on_edit_pair, pair["name"], server_name))
@@ -587,8 +627,13 @@ class NasyncWindow(Adw.ApplicationWindow):
             self._progress_detail.set_label(f"'{active}' has no sync pairs yet.")
             return
 
-        self._progress_detail.set_label(
-            f"{label} · sends {count} folder(s) to '{active}'{consequence}")
+        summary = f"{label} · sends {count} folder(s) to '{active}'{consequence}"
+        # The run that happened while the window was closed is the one people
+        # open the app to ask about.
+        last = activity.read_last(self.config.config_dir)
+        if last:
+            summary += "\n" + activity.describe_last(last)
+        self._progress_detail.set_label(summary)
 
     #: A repeat of the same message inside this many seconds is swallowed. One
     #: settings change can report itself twice — once on write, once when the
@@ -830,8 +875,14 @@ class NasyncWindow(Adw.ApplicationWindow):
                 bool(self.config.get_active_server_name()))
         self._cancel_button.set_sensitive(busy)
 
-    def start_transfer(self, direction: str, dry_run: bool) -> None:
-        if self._busy:
+    def start_transfer(self, direction: str, dry_run: bool,
+                       confirmed: list = None) -> None:
+        """Run a sync, dry run or restore.
+
+        `confirmed` names pairs whose mirror run was held back and that a
+        person has now agreed may delete; only those are run, with that yes.
+        """
+        if self._busy or self._bg_status is not None:
             return
         if not self.config.get_active_server_name():
             self.toast("Pick a server first.")
@@ -861,10 +912,19 @@ class NasyncWindow(Adw.ApplicationWindow):
         )
 
         def work():
+            if confirmed:
+                merged = None
+                for name in confirmed:
+                    result = syncer.sync_pair(name, allow_mass_delete=True)
+                    merged = _merge_results(merged, result)
+                    if result.get("cancelled"):
+                        break
+                return merged
             if direction == "push":
                 return syncer.sync_pair(dry_run=dry_run)
             return syncer.restore_pair(dry_run=dry_run)
 
+        self._last_dry_run = dry_run
         run_async(work, on_done=self._on_transfer_done, on_error=self._on_transfer_error)
 
     def cancel_transfer(self) -> None:
@@ -872,6 +932,12 @@ class NasyncWindow(Adw.ApplicationWindow):
             self._cancel_event.set()
             self._progress_title.set_label("Cancelling…")
             self._cancel_button.set_sensitive(False)
+        elif self._bg_status is not None:
+            # Not ours: ask whichever process is running it to stop.
+            if activity.request_cancel(self.config.config_dir):
+                self._bg_cancelling = True
+                self._progress_title.set_label("Cancelling…")
+                self._cancel_button.set_sensitive(False)
 
     def _collect_report(self, message: str) -> None:
         """Keep the failure lines out of the reporter stream, drop the rest.
@@ -885,6 +951,8 @@ class NasyncWindow(Adw.ApplicationWindow):
         text = message.strip()
         if text.startswith("❌"):
             self._errors.append(text.lstrip("❌ "))
+        elif text.startswith("🛑"):
+            self._errors.append(text.lstrip("🛑 "))
         elif text.startswith("!") and "name illegal on SMB" not in text:
             self._errors.append(text.lstrip("! "))
 
@@ -1008,8 +1076,19 @@ class NasyncWindow(Adw.ApplicationWindow):
         parts = [f"{result.get('transferred', 0)} transferred",
                  f"{result.get('skipped', 0)} unchanged",
                  f"{result.get('deleted', 0)} removed"]
+        if result.get("moved"):
+            parts.append(f"{result['moved']} moved")
         if unsupported:
             parts.append(f"{unsupported} skipped (name illegal on SMB)")
+        held = [r for r in result.get("refused", []) if not r.get("dry_run")]
+        would_hold = [r for r in result.get("refused", []) if r.get("dry_run")]
+        if held:
+            parts.append(f"{len(held)} held back")
+        if would_hold:
+            parts.append("a real run would stop at "
+                         + ", ".join(r["pair"] for r in would_hold))
+        if result.get("overlapping"):
+            parts.append(f"{len(result['overlapping'])} skipped (shared folder)")
         self._progress_detail.set_label("  ·  ".join(parts))
         self._details_button.set_visible(bool(self._errors))
         self.toast("Sync complete" if not problems
@@ -1017,6 +1096,133 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._notify_unattended(
             f"Sync finished with {problems} error(s)" if problems else "Sync complete",
             f"{self.config.get_active_server_name()}  ·  " + "  ·  ".join(parts))
+        confirmable = [r for r in held if r.get("confirmable")]
+        if confirmable:
+            self._confirm_mass_delete(confirmable)
+
+    def _confirm_mass_delete(self, held: list) -> None:
+        """Ask before letting held-back mirror runs delete.
+
+        Nothing has been deleted when this appears: the run stopped before
+        touching the server. Saying so is half the point of the dialog — the
+        other half is that the default answer keeps the files.
+        """
+        lines = [f"• '{r['pair']}' would delete {r['deletes']:,} of "
+                 f"{r['total']:,} file(s) in its server folder." for r in held]
+        dialog = Adw.AlertDialog(
+            heading="Delete files on the server?",
+            body="\n".join(lines) + "\n\nNothing has been deleted yet. This "
+                 "usually means a folder moved, a disk didn't mount, or a pair "
+                 "points somewhere unexpected. Dry run lists every file first.")
+        dialog.add_response("keep", "Keep Them")
+        dialog.add_response("delete", "Delete")
+        dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("keep")
+        dialog.set_close_response("keep")
+        names = [r["pair"] for r in held]
+        dialog.connect("response", lambda _d, response: (
+            self.start_transfer("push", False, confirmed=names)
+            if response == "delete" else None))
+        dialog.present(self)
+
+    # ------------------------------------------------------------------ #
+    # Syncs run by another process
+    # ------------------------------------------------------------------ #
+    def _poll_activity(self) -> bool:
+        """Show a sync this window didn't start: the service's, or the CLI's.
+
+        A file read and a lock probe, once a second — cheap enough to leave
+        running for the life of the window. Returns True to keep the timer.
+        """
+        if self._busy:
+            return True                      # our own run; its progress is up
+        status = activity.read_status(self.config.config_dir)
+        if status is not None and status.get("pid") == os.getpid():
+            status = None
+        if status is not None:
+            self._show_background(status, first=self._bg_status is None)
+        elif self._bg_status is not None:
+            self._background_finished(self._bg_status)
+        self._bg_status = status
+        return True
+
+    def _show_background(self, status: dict, first: bool) -> None:
+        if first:
+            for button in (self._sync_button, self._dryrun_button,
+                           self._restore_button):
+                button.set_sensitive(False)
+            self._cancel_button.set_sensitive(True)
+            self._details_button.set_visible(False)
+            self._log_scroll.set_visible(True)
+            self._bg_cancelling = False
+        if not self._bg_cancelling:
+            self._progress_title.set_label(
+                "Background sync running…" if status.get("source") == "background"
+                else "Sync running elsewhere…")
+        self._progress_bar.set_fraction(activity.progress_fraction(status))
+        line = activity.describe(status)
+        self._progress_detail.set_label(line[0].upper() + line[1:])
+        if status.get("files_total"):
+            self._progress_log.set_label(
+                f"{status.get('verb', 'Working')} {status.get('files_done', 0)}"
+                f"/{status['files_total']} — {status.get('file', '')}")
+        else:
+            self._progress_log.set_label(
+                f"Comparing '{status.get('pair', '')}'…" if status.get("pair")
+                else "Starting…")
+
+    def _background_finished(self, was: dict) -> None:
+        """The other process is done: say what it did, then hand back control."""
+        self._cancel_button.set_sensitive(False)
+        self._set_actions_sensitive(bool(self.config.get_active_server_name()))
+        self._log_scroll.set_visible(False)
+        self._bg_cancelling = False
+        last = activity.read_last(self.config.config_dir)
+        if not last or abs(last.get("started", 0) - was.get("started", -1)) > 1:
+            self._progress_title.set_label("Idle")
+            self._progress_bar.set_fraction(0.0)
+            self.refresh_summary()
+            return
+        outcome = last.get("result", {})
+        problems = outcome.get("failed", 0) + outcome.get("errors", 0)
+        who = ("Background sync" if last.get("source") == "background"
+               else "Sync")
+        if outcome.get("cancelled"):
+            self._progress_title.set_label(f"{who} cancelled")
+            self._progress_bar.set_fraction(0.0)
+        else:
+            self._progress_title.set_label(
+                f"{who} finished with {problems} error(s)" if problems
+                else f"{who} complete")
+            self._progress_bar.set_fraction(1.0)
+        self._progress_detail.set_label(activity.describe_last(last))
+
+    def _repair_installs(self) -> None:
+        """Repoint a launcher or service that points at a NASync that's gone.
+
+        A checkout moved, or a Python upgrade under its virtualenv, leaves both
+        failing silently — the launcher opens nothing, the service restarts
+        every thirty seconds forever. This program evidently runs, so it is
+        what they should point at. Off the main loop: checking means running
+        the old program once.
+        """
+        def work():
+            fixed = []
+            for name, module in (("app launcher", launcher),
+                                 ("background service", service)):
+                try:
+                    if module.repair():
+                        fixed.append(name)
+                except Exception:          # noqa: BLE001 — best effort
+                    pass
+            return fixed
+
+        def done(fixed):
+            if fixed:
+                self.toast(f"Repaired the {' and '.join(fixed)}: it pointed "
+                           f"at a copy of NASync that no longer runs")
+
+        run_async(work, on_done=done)
 
     def _on_transfer_error(self, exc) -> None:
         self._set_busy(False)

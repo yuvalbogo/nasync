@@ -104,6 +104,40 @@ def normalize_remote(path: str) -> str:
     return "/".join(parts)
 
 
+def destinations_overlap(first: str, second: str) -> bool:
+    """True when one server folder is the other, or lies inside it.
+
+    Two such pairs cannot both be mirrored: each run makes the folder match
+    its own local side and deletes the other pair's files as "removed
+    locally". On a real NAS that cost 57,000 files a night, re-uploaded and
+    deleted again on every run. Compared case-insensitively, because the
+    share does: "Pictures" and "pictures" are one folder there.
+    """
+    a = [part.casefold() for part in normalize_remote(first).split("/") if part]
+    b = [part.casefold() for part in normalize_remote(second).split("/") if part]
+    depth = min(len(a), len(b))
+    return a[:depth] == b[:depth]
+
+
+def overlap_message(dest: str, other_name: str, other_dest: str) -> str:
+    """Why a destination can't be used, said in terms of what would be lost."""
+    shown = dest or "/"
+    other_shown = other_dest or "/"
+    if normalize_remote(dest).casefold() == normalize_remote(other_dest).casefold():
+        return (f"'{shown}' is already the server folder of pair "
+                f"'{other_name}'. Two pairs in one folder delete each other's "
+                f"files in mirror mode — give each pair a folder of its own.")
+    if len(normalize_remote(dest)) > len(normalize_remote(other_dest)):
+        return (f"'{shown}' is inside the server folder of pair "
+                f"'{other_name}' ('{other_shown}'), whose mirror sync would "
+                f"delete everything this pair puts there. Choose a folder "
+                f"beside it instead.")
+    return (f"'{shown}' contains the server folder of pair '{other_name}' "
+            f"('{other_shown}'), so this pair's mirror sync would delete "
+            f"everything that one puts there. Choose a folder beside it "
+            f"instead.")
+
+
 def join_remote(root: str, path: str) -> str:
     """Join a pair's destination onto its sync root, staying inside it."""
     root = normalize_remote(root)
@@ -950,6 +984,7 @@ class Config:
                 f"A pair named '{name}' already exists on '{target}'. "
                 f"Use --name to choose a different name, or remove it first."
             )
+        self._refuse_overlap(server_path, target)
         self._own_pairs(target).append({
             "name": name,
             "local": local_path,
@@ -966,6 +1001,7 @@ class Config:
         local_path = os.path.abspath(os.path.expanduser(local_path))
         if name != orig_name and self.get_pair(name, server):
             raise ValueError(f"A pair named '{name}' already exists.")
+        self._refuse_overlap(server_path, server, ignore=orig_name)
         for pair in self._owned_pairs(server):
             if pair["name"] == orig_name:
                 pair["name"] = name
@@ -987,6 +1023,40 @@ class Config:
     def get_pairs(self, server: str = None):
         """Pairs belonging to `server`, or to the active server by default."""
         return self._owned_pairs(server)
+
+    def pair_overlapping(self, server_path: str, server: str = None,
+                         ignore: str = None):
+        """The first pair of `server` whose folder overlaps `server_path`."""
+        for pair in self._owned_pairs(server):
+            if pair["name"] != ignore and destinations_overlap(
+                    server_path, pair["server"]):
+                return pair
+        return None
+
+    def _refuse_overlap(self, server_path: str, server: str = None,
+                        ignore: str = None) -> None:
+        """Refuse a destination another pair already covers, while someone is
+        looking at the error — not at 19:25 when the mirror run deletes."""
+        clash = self.pair_overlapping(server_path, server, ignore)
+        if clash:
+            raise ValueError(overlap_message(server_path, clash["name"],
+                                             clash["server"]))
+
+    def overlapping_pairs(self, server: str = None) -> dict:
+        """``{pair_name: [names of pairs whose folder overlaps it]}``.
+
+        Configs written before 0.20.0 can already contain overlaps, which no
+        longer get in at the door. Sync skips these pairs, and both front-ends
+        flag them, so the existing ones stop deleting and get noticed.
+        """
+        pairs = self._owned_pairs(server)
+        clashes = {}
+        for i, first in enumerate(pairs):
+            for second in pairs[i + 1:]:
+                if destinations_overlap(first["server"], second["server"]):
+                    clashes.setdefault(first["name"], []).append(second["name"])
+                    clashes.setdefault(second["name"], []).append(first["name"])
+        return clashes
 
     def get_pair(self, name: str, server: str = None):
         for pair in self._owned_pairs(server):

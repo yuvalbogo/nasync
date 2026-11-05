@@ -1,3 +1,117 @@
 BUGS NEEDS TO FIX:
 1. notifications: one notification after a sync. right now it raises a notification for each file independently - which results as large number of "1 file tranfered" instead of 1 "X files transfered".
 2. mirror sync deletes all files keep the empty directories - it should delete the directories as well.
+3. the app dont open on fedora 45
+4. the notification system is not optimal - it alerts the starting of a sync at scheduled time - but when I open the app I dont see it running.
+5. I think the mirror process of syncing is not optimal (check my statement!): I think that if I change one item in a directory, the sync deletes and copies the entire directory instead of the single file.
+
+
+==============================================================================
+FINDINGS — checked 05.11.26 against v0.19.1
+Tested on an isolated profile (own XDG_CONFIG_HOME, no D-Bus) syncing junk
+trees to a throwaway local Samba container. Real config / NAS not touched.
+==============================================================================
+
+URGENT (your data / your machine, not the code)
+-----------------------------------------------
+U1. ~/Programming is now EMPTY (moved to ~/Projects on 05.11.26). The
+    "Programming" pair mirrors it to yuval/Programming, and nothing guards an
+    empty source: the next mirror run deletes ~23,000 files on the NAS.
+U2. Pairs share destinations, so mirror pairs delete each other's files:
+      Pictures + backgrounds          -> yuval/Pictures
+      .themes + icons + vpn           -> yuval/various_dirs
+    31.10.26 run: icons uploaded 57,196 then vpn deleted 56,973; Pictures
+    uploaded 1,505 then backgrounds deleted 1,505. Run took 2h15m. After it,
+    the NAS held only 8 files in Pictures and 4 in various_dirs.
+U3. Background service down since 05.11.26 15:15 (see #3) — the 19:25 run
+    will not happen until it is repaired.
+
+STATUS OF THE REPORTED BUGS
+---------------------------
+#1 notifications — MOSTLY FIXED in 0.19.1 (one scheduled run of 25 files =
+   one "Syncing…" + one "25 transferred"). Still wrong:
+   1a. "unchanged" is summed across runs (showed 135 unchanged for 30 files).
+   1b. every later burst re-posts the whole-episode total, so a burst that
+       deleted one file says "Sync complete · 30 transferred".
+   1c. after the first summary, "Syncing…" never appears again for the life
+       of the service (the 4h episode reset is not checked when starting).
+   1d. a run that changes nothing withdraws the summary that is on screen.
+
+#2 mirror empty dirs — FIXED for new deletions. Still wrong:
+   2a. empty folders already on the server (e.g. left by older versions) are
+       only removed when some file in that pair changes — the "Already up to
+       date" early return skips the cleanup (samba.py ~830).
+
+#3 app won't open on Fedora 45 — CONFIRMED, cause is the install, not code:
+   3a. desktop entry + systemd unit point to
+       /home/yuval/Programming/nasync/.venv/bin/nasync (gone since the move).
+   3b. .venv was built on Python 3.14; F45 brought 3.15, the venv now runs
+       3.15 and cannot see its packages (even `nasync --version` fails).
+   3c. nothing tells you: the unit crash-loops every 30s silently and the
+       app has no way to say "the service points at a missing program".
+   Code itself is fine on F45: fresh 3.15 venv -> GUI opens, tests pass.
+
+#4 app doesn't show the background sync — CONFIRMED:
+   4a. service and GUI share nothing (no status, no cross-process lock).
+   4b. two syncs of the same pair ran at once, collided ("file in use by
+       another process") — pressing Sync during a background run starts a
+       second, overlapping mirror sync.
+   4c. `nasync status` shows nothing about a sync in progress.
+
+#5 "one change re-copies the whole directory" — statement is WRONG (one
+   changed file = one upload), but what you saw is real: it is U2.
+   5a. add/edit pair never checks for same or nested destinations.
+   5b. no guard against an empty source or a near-total delete in mirror.
+
+NEW ENGINE BUGS FOUND WHILE TESTING #5
+--------------------------------------
+N1. Same-size edits are NEVER backed up: files are compared by size only.
+    Reproduced: server copy stays stale, nothing reports it.
+N2. Renaming a file by case only (img_09 -> IMG_09) deletes it from the NAS
+    until the next sync (Samba is case-insensitive: upload overwrites, then
+    the mirror delete removes it).
+N3. Renaming a folder re-uploads every file and deletes the old copy (no
+    rename detection) — 40 up / 40 deleted in the test.
+N4. Live sync: a change made while another sync runs is dropped — the
+    trigger fires, finds the lock busy, and nothing re-arms it. Same when
+    away from home: arriving home does NOT sync what piled up (the module
+    docstring says it does).
+N5. CLI prints "✅ Sync completed!" even when files failed to upload.
+
+ADDED AFTER THE FIXES STARTED
+-----------------------------
+N6. tests/test_gui.py imports names that no longer exist (AutomaticPopover,
+    ModePopover, _format_bytes); the ImportError is read as "GTK missing", so
+    all 45 GUI tests skip silently. NOT FIXED — logged in ROADMAP Open.
+N7. ~/.local/bin/nasync (first on PATH) is also broken by the Python
+    upgrade: `nasync` typed in a terminal fails with "No module named nasync".
+N8. Dev pin flake8==6.0.0 doesn't run on Python 3.15. NOT FIXED — in ROADMAP.
+
+
+==============================================================================
+FIXED in v0.20.0 — 05.11.26
+Verified: 300 unit tests, 23 end-to-end checks against a real Samba server,
+11 checks driving the real app window. All on an isolated test profile.
+==============================================================================
+U1  Programming pair repointed to ~/Projects (config backup:
+    ~/.config/nasync/config.json.pre-0.20-backup) — and mirror now refuses
+    an empty local folder outright.
+U2  Pairs repointed: .themes/icons/vpn/backgrounds -> various_dirs/<name>.
+    Overlapping pairs are refused at add/edit and skipped at sync.
+U3  .venv rebuilt on Python 3.15; launcher + service repointed (see below).
+1a-1d  notification fixes (unchanged not summed, "N syncs since HH:MM",
+       "Syncing…" returns after an episode, quiet runs keep the summary).
+2a  leftover empty folders removed on every mirror run.
+3a-3c  stale launcher/service detected (`nasync status`, `service status`)
+       and repaired automatically when the app opens.
+4a-4c  machine-wide sync lock + status: one sync at a time, the app shows
+       the background sync with progress and Cancel, `nasync status` /
+       `nasync cancel`.
+5a  one server folder per pair. 5b  empty-source refusal + >50% (≥50 files)
+    deletes ask first (app dialog, CLI prompt, notification when unattended).
+N1  size + modification time; uploads carry the local time.
+N2  case-only rename renamed in place (via a temp name — Samba refuses it
+    in one step).
+N3  renamed folders moved on the server, not re-uploaded.
+N4  live sync remembers changes it couldn't sync yet (busy / away).
+N5  CLI says "finished with N problem(s)" instead of "completed!".

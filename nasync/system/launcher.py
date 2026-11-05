@@ -97,6 +97,79 @@ def _nasync_exec() -> str:
     return os.path.realpath(shutil.which("nasync") or candidate)
 
 
+def exec_problem(path: str):
+    """Why `path` can't be run as NASync, as a phrase — or None if it can.
+
+    Two ways an installed launcher or service goes stale without anything
+    saying so, both seen on one machine on one day: the checkout it points at
+    was **moved** (the file is gone), and the distribution **upgraded Python**
+    under a virtualenv (the file is there, but its packages are not, so it
+    dies on import). Only running it catches the second, so it is run.
+    """
+    if not path:
+        return None
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        return f"it points at {path}, which no longer exists"
+    try:
+        result = subprocess.run([path, "--version"], capture_output=True,
+                                text=True, timeout=30)
+    except Exception as exc:                     # noqa: BLE001 — reported
+        return f"{path} could not be started ({exc})"
+    if result.returncode != 0:
+        last = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = last[-1] if last else f"exit status {result.returncode}"
+        return f"{path} fails to start ({reason})"
+    return None
+
+
+def desktop_entry() -> Path:
+    return _data_home() / "applications" / f"{APP_ID}.desktop"
+
+
+def entry_exec(text: str):
+    """The program an installed .desktop file or systemd unit would run."""
+    import shlex
+    for line in text.splitlines():
+        for key in ("Exec=", "ExecStart="):
+            if line.startswith(key):
+                try:
+                    parts = shlex.split(line[len(key):])
+                except ValueError:
+                    return None
+                return parts[0] if parts else None
+    return None
+
+
+def problem():
+    """Why the installed launcher wouldn't open the app, or None."""
+    entry = desktop_entry()
+    if not entry.is_file():
+        return None
+    try:
+        return exec_problem(entry_exec(entry.read_text()))
+    except OSError:
+        return None
+
+
+def repair() -> bool:
+    """Point a broken launcher at the program running now. True if it did.
+
+    Only ever from a working NASync — this code is running, so the program
+    running it opens the app — and never inside a Flatpak, whose launcher is
+    the sandbox's to manage.
+    """
+    from nasync.system.portal import in_flatpak
+    if in_flatpak() or problem() is None:
+        return False
+    # Never trade one broken pointer for another: started some way other
+    # than through a `nasync` executable, the fallback is whatever PATH says,
+    # which may be the very install that broke.
+    if exec_problem(_nasync_exec()) is not None:
+        return False
+    install(gui=True)
+    return True
+
+
 def _refresh_caches(apps_dir: Path, data_home: Path) -> None:
     for cmd in (
         ["update-desktop-database", str(apps_dir)],

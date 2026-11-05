@@ -86,3 +86,22 @@ def test_install_clears_the_pre_0_3_0_entry():
 if __name__ == "__main__":
     test_install_and_uninstall()
     test_install_clears_the_pre_0_3_0_entry()
+
+
+def test_a_program_that_is_gone_or_will_not_start_is_named():
+    import os
+    import stat
+    import tempfile
+    from nasync.system.launcher import entry_exec, exec_problem
+
+    assert entry_exec("[Desktop Entry]\nExec=/a/b/nasync gui\n") == "/a/b/nasync"
+    assert entry_exec("[Service]\nExecStart=/x/nasync auto\n") == "/x/nasync"
+    assert "no longer exists" in exec_problem("/no/such/nasync")
+    with tempfile.TemporaryDirectory() as tmp:
+        broken = os.path.join(tmp, "nasync")
+        with open(broken, "w") as handle:
+            # What a virtualenv's script does after a Python upgrade.
+            handle.write("#!/bin/sh\necho \"ModuleNotFoundError: No module "
+                         "named 'nasync'\" >&2\nexit 1\n")
+        os.chmod(broken, stat.S_IRWXU)
+        assert "No module named" in exec_problem(broken)

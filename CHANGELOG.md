@@ -2,6 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0] - 2026-11-05
+
+### Fixed
+- **Mirror pairs that shared a server folder deleted each other's files.**
+  Two pairs pointed at one folder each made it match *their* local side on
+  every run, deleting the other's files as "removed locally" — on one NAS,
+  57,196 files uploaded and 56,973 deleted again in a single scheduled run,
+  leaving the backup of those folders empty between runs. A pair can no longer
+  share a server folder with another or sit inside one; adding or editing such
+  a pair is refused with the reason. Pairs like that already in a config are
+  skipped by sync and flagged by `nasync list`, `nasync status` and the app.
+- **Mirror would wipe a server folder whose local folder was empty.** A folder
+  moved elsewhere, or a disk that didn't mount, read as "everything was
+  deleted". Mirror now refuses outright to run an empty local folder over a
+  non-empty server one, and asks before deleting more than half of a folder's
+  server files (50 or more): `nasync sync` prompts (`--allow-mass-delete` for
+  scripts), the app shows a *Delete files on the server?* dialog that defaults
+  to keeping them, and the background service holds the run back and sends a
+  *Sync held back* notification. Nothing is touched before the question.
+- **Edits that kept a file the same size never reached the backup.** Change
+  detection compared sizes only. It now compares modification times too, and
+  uploads carry the local time to the server. Files uploaded by older versions
+  are not sent again: their time is recorded once, on the first sync.
+- **Renaming a file only in letter case deleted it from the NAS** until the
+  next sync: on a case-insensitive share the upload overwrote the same file,
+  and the mirror delete then removed it. It is now renamed in place.
+- **Renaming a folder uploaded all of it again** and deleted the old copy. A
+  file whose name, size and time match one being deleted is now moved on the
+  server instead.
+- **Empty folders left behind on the server** (for example by versions before
+  0.19.0) were only removed once some file in that pair changed. They're now
+  removed on any mirror run.
+- **Live sync dropped changes.** An edit made while another sync was running
+  found the lock busy and was forgotten until the next edit; changes made away
+  from home were not synced on arriving, despite the docs. Both are now
+  remembered and synced as soon as possible.
+- **Notifications:** "unchanged" no longer adds up across runs (it showed 135
+  unchanged for a folder of 30); a running total now says "N syncs since
+  HH:MM" so it isn't read as one transfer; "Syncing…" appears again once an
+  episode is over instead of never again for the life of the service; and a
+  run that changed nothing no longer takes the previous summary off screen.
+- `nasync sync` and `nasync restore` no longer print "✅ completed!" when
+  files failed.
+- **Restore** now fetches a server file that is newer but the same size, and
+  carries the server's modification time back.
+
+### Added
+- **The app shows syncs it didn't start.** The background service, the app
+  and the CLI now share a lock and a status file, so only one sync runs at a
+  time — a second is refused with who is running the first — and the app
+  shows a background sync with its folder, progress bar and a working
+  **Cancel**. When it finishes, the app says what it did, and the line above
+  **Sync** keeps saying when the last sync ran and what it moved.
+- `nasync cancel` stops whichever sync is running; `nasync status` shows a
+  sync in progress, or the last one.
+- **Stale installs are detected and repaired.** A launcher or background
+  service pointing at a moved checkout, or at a virtualenv broken by a Python
+  upgrade, used to fail silently (the service restarted every 30 seconds,
+  forever). `nasync service status` and `nasync status` now say why it can't
+  start, and opening the app repoints both at the running NASync.
+
 ## [0.19.1] - 2026-09-01
 
 ### Fixed
