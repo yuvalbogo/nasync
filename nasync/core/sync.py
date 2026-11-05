@@ -259,26 +259,29 @@ class Syncer:
                     # moves its pairs with it, and a pair can never name a path
                     # outside the root even if the config file is hand-edited.
                     record.register()
+                    push = {"unattended": unattended,
+                            "outstanding": record.held} if direction == "push" else {}
                     stats = client.sync_directory(
                         pair["local"], landing,
                         direction=direction, dry_run=dry_run, mirror=mirror,
-                        allow_mass_delete=allowed, state=record,
-                        **({"unattended": unattended} if direction == "push" else {}),
-                    )
+                        allow_mass_delete=allowed, state=record, **push)
                     held = stats.get("held")
-                    # Server-side failures only: an unreadable local file
-                    # can't be fixed by retrying, and used to keep a pair in
-                    # bootstrap — deleting other people's files — for ever.
+                    held_deletes = bool(held and held.get("hold_deletes", True))
                     server_errors = stats.get("errors", 0) - stats.get("local_errors", 0)
-                    if (direction == "push" and not dry_run and not server_errors
-                            and not (held and held.get("hold_deletes", True))):
+                    if direction == "push" and not dry_run and not held_deletes:
                         # From now on a server file without a record was put
                         # there by someone else, and is never deleted. Not
                         # while deletions are held back: until someone answers,
                         # the files in question must still count as NASync's.
+                        # Errors don't stop it: a file the run missed is one
+                        # NASync then *keeps* (as someone else's), never one
+                        # it deletes — while staying in bootstrap meant
+                        # deleting other people's files on every run, for as
+                        # long as one name couldn't be stored.
                         record.mark_initialised()
-                        if mirror:
-                            record.mark_mirrored()
+                        record.mark_mirrored(mirror)
+                    if direction == "push" and not dry_run:
+                        record.mark_held(held_deletes)
                     for key in totals:
                         totals[key] += stats.get(key, 0)
                     if stats.get("refused"):
@@ -300,7 +303,8 @@ class Syncer:
                     refused.append({"pair": pair["name"], "message": str(e),
                                     "deletes": e.deletes, "total": e.total,
                                     "confirmable": e.confirmable,
-                                    "fingerprint": e.fingerprint})
+                                    "fingerprint": e.fingerprint,
+                                    "sample": e.sample})
                     outcome[pair["name"]] = "held"
                     failed += 1
                 except SyncCancelled:

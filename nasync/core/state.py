@@ -115,6 +115,13 @@ class SyncState:
                                (self.key,)).fetchone()
         return bool(row and row[0])
 
+    @property
+    def held(self) -> bool:
+        """A run held back deletions here and nobody has answered yet."""
+        row = self._db.execute("SELECT held FROM pairs WHERE key = ?",
+                               (self.key,)).fetchone()
+        return bool(row and row[0])
+
     def load(self) -> dict:
         rows = self._db.execute(
             "SELECT rel, size, mtime, remote_size, remote_mtime, sha256, mode, kept "
@@ -160,12 +167,22 @@ class SyncState:
             (self.key, self.server, self.destination, time.time()))
         self._db.commit()
 
-    def mark_mirrored(self) -> None:
-        """The pair has finished a mirror run with nothing held back."""
+    def mark_mirrored(self, mirrored: bool = True) -> None:
+        """The pair has finished a mirror run with nothing held back — or,
+        with False, an update run, after which the next mirror run is a
+        first one again (it deletes what was left behind meanwhile)."""
         if self.read_only:
             return
         self._db.execute("UPDATE pairs SET mirrored = ? WHERE key = ?",
-                         (time.time(), self.key))
+                         (time.time() if mirrored else None, self.key))
+        self._db.commit()
+
+    def mark_held(self, held: bool = True) -> None:
+        """Remember an unanswered hold, so no run deletes past it unasked."""
+        if self.read_only:
+            return
+        self._db.execute("UPDATE pairs SET held = ? WHERE key = ?",
+                         (time.time() if held else None, self.key))
         self._db.commit()
 
     def register(self) -> None:
@@ -196,10 +213,24 @@ def _open(config_dir) -> sqlite3.Connection:
     db = sqlite3.connect(os.path.join(str(config_dir), DB_NAME), timeout=30)
     db.executescript(_SCHEMA)
     columns = {row[1] for row in db.execute("PRAGMA table_info(pairs)")}
-    if "mirrored" not in columns:                     # added in 0.21.1
-        db.execute("ALTER TABLE pairs ADD COLUMN mirrored REAL")
-        db.commit()
+    for column in ("mirrored", "held"):               # added in 0.21.1, 0.22.1
+        if column not in columns:
+            db.execute(f"ALTER TABLE pairs ADD COLUMN {column} REAL")
+    db.commit()
     return db
+
+
+def reset_mirrored(config_dir, server: str) -> None:
+    """A server switched to update mode: its next mirror run is a first one."""
+    path = os.path.join(str(config_dir), DB_NAME)
+    if not os.path.exists(path):
+        return
+    db = _open(config_dir)
+    try:
+        db.execute("UPDATE pairs SET mirrored = NULL WHERE server = ?", (server,))
+        db.commit()
+    finally:
+        db.close()
 
 
 def rename_server(config_dir, old: str, new: str, share: str) -> None:
@@ -218,6 +249,12 @@ def rename_server(config_dir, old: str, new: str, share: str) -> None:
             if key != pair_key(old, share, destination):
                 continue                       # another share's record
             moved = pair_key(new, share, destination)
+            if moved == key:
+                # Only the letter case changed, and the key ignores case: the
+                # record is already where it belongs. Deleting "the target"
+                # here wiped it (third audit, #5).
+                db.execute("UPDATE pairs SET server = ? WHERE key = ?", (new, key))
+                continue
             db.execute("DELETE FROM entries WHERE key = ?", (moved,))
             db.execute("DELETE FROM pairs WHERE key = ?", (moved,))
             db.execute("UPDATE entries SET key = ? WHERE key = ?", (moved, key))

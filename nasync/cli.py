@@ -305,7 +305,10 @@ def _finished(result: dict, verb: str) -> None:
 @click.option("--allow-mass-delete", is_flag=True,
               help="Let a mirror run delete more than half of a folder's "
                    "server files without asking")
-def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server (default: the active one — name it in scripts, "
+                   "since switching tabs in the app changes the active one)")
+def sync(pair, dry_run, mode, no_delete, allow_mass_delete, server):
     """Sync local directories to the server (incremental)
 
     Only new or changed files are uploaded and unchanged ones are skipped, in
@@ -327,8 +330,9 @@ def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
     elif no_delete:
         mirror = False
 
+    server = _require_server(Config(), server)
     try:
-        result = Syncer(source="cli").sync_pair(
+        result = Syncer(source="cli", server=server).sync_pair(
             pair, dry_run=dry_run, mirror=mirror,
             allow_mass_delete=allow_mass_delete)
     except Exception as e:
@@ -351,6 +355,11 @@ def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
             click.echo(f"🛑 '{r['pair']}' would {' and '.join(what) or 'change'} "
                        f"of {r['total']:,} file(s) on the server. New files were "
                        f"backed up; only this part waited.")
+            for line in r.get("sample", []):
+                click.echo(f"     {line}")
+            if len(r.get("sample", [])) < r.get("deletes", 0) + r.get("overwrites", 0):
+                click.echo("     … the full list: nasync sync --dry-run"
+                           + (f" --pair '{r['pair']}'" if r.get("pair") else ""))
         if not sys.stdin.isatty():
             click.echo("   Not asking without a terminal. Check with "
                        "'nasync sync --dry-run', then run again with "
@@ -360,7 +369,7 @@ def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
             answered = True
             for r in held:
                 try:
-                    again = Syncer(source="cli").sync_pair(
+                    again = Syncer(source="cli", server=server).sync_pair(
                         r["pair"], mirror=mirror,
                         allow_mass_delete={r["pair"]: r.get("fingerprint")})
                 except Exception as e:
@@ -383,22 +392,27 @@ def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
 @click.option("--pair", default=None, help="Specific pair name to restore")
 @click.option("--dry-run", is_flag=True, help="Show what would be restored without doing it")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation prompt")
-def restore(pair, dry_run, yes):
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server (default: the active one)")
+def restore(pair, dry_run, yes, server):
     """Restore local directories from server backup
 
-    Adds and overwrites local files only — local files the server doesn't have
-    are never deleted, whichever sync mode is set.
+    Copies back files that are missing here and updates ones older than the
+    backup. Files changed since their last backup are kept, and local files
+    the server doesn't have are never deleted, whichever sync mode is set.
     """
+    server = _require_server(Config(), server)
     if dry_run:
         click.echo("🔍 Dry-run mode (no files will be transferred)")
     elif not yes:
-        click.echo("⚠️  This will overwrite local files with server versions")
+        click.echo("📥 This copies files back from the server. Files you changed "
+                   "since their last backup are kept; nothing local is deleted.")
         if not click.confirm("Continue?"):
             click.echo("Cancelled.")
             return
 
     try:
-        result = Syncer(source="cli").restore_pair(pair, dry_run=dry_run)
+        result = Syncer(source="cli", server=server).restore_pair(pair, dry_run=dry_run)
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)

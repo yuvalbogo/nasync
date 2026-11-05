@@ -118,14 +118,23 @@ def _mutator(method):
 
     Only the outermost call re-reads: a mutator that calls another must not
     discard the half-made change it is in the middle of.
+
+    A change that fails is undone in memory too: the copy is re-read from
+    disk. Until 0.22.1 a removal that failed on a locked keyring left the
+    server half-removed in memory, and the next unrelated save wrote it out.
     """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        if not self._mutating and not self._initialising:
+        outermost = not self._mutating and not self._initialising
+        if outermost:
             self.refresh()
         self._mutating += 1
         try:
             return method(self, *args, **kwargs)
+        except BaseException:
+            if outermost:
+                self.reload()
+            raise
         finally:
             self._mutating -= 1
     return wrapper
@@ -737,15 +746,9 @@ class Config:
             old_entry = self._server_entry(orig_name)
             if old_entry.get("identity"):
                 settings["identity"] = old_entry["identity"]
-            if (old_entry.get("share") or "").casefold() == (share or "").casefold():
-                # The record of what was uploaded is filed under the entry's
-                # name; without this a rename sent every pair back to
-                # bootstrap, where a mirror deletes conflict copies.
-                from nasync.core import state
-                state.rename_server(self.config_dir, orig_name, name,
-                                    old_entry.get("share") or "")
+            old_share = old_entry.get("share") or ""
 
-            self.remove_server(orig_name)
+            self.remove_server(orig_name, _keep_record=True)
             self.add_or_update_server(name, ip, username, password, share, port,
                                       encrypt, root=root)
             if pairs:
@@ -754,19 +757,28 @@ class Config:
                 self._server_entry(name).update(settings)
             if pairs or settings:
                 self.save()
+            # Last, once nothing above can fail and leave it half done. The
+            # record is filed under the entry's name; without this a rename
+            # sent every pair back to bootstrap, where mirror deletes others'
+            # files. Another share is other files: its record isn't carried.
+            from nasync.core import state
+            if old_share.casefold() == (share or "").casefold():
+                state.rename_server(self.config_dir, orig_name, name, old_share)
+            else:
+                state.forget_server(self.config_dir, orig_name)
         else:
             self.add_or_update_server(name, ip, username, password, share, port,
                                       encrypt, root=root)
         return name
 
     @_mutator
-    def remove_server(self, name: str):
-        from nasync.core import state
-        state.forget_server(self.config_dir, name)
-        self.data["servers"] = [s for s in self.data["servers"] if s["name"] != name]
+    def remove_server(self, name: str, _keep_record: bool = False):
+        # The saved passwords first: reading them is what fails (a locked
+        # keyring), and nothing is changed before it does.
         creds = self._read_creds()
         creds.pop(name, None)
         self._write_creds(creds)
+        self.data["servers"] = [s for s in self.data["servers"] if s["name"] != name]
         # The pairs belonged to this server; nothing else can sync them.
         self.data["pairs_by_server"].pop(name, None)
         if self.data.get("active_server") == name:
@@ -774,6 +786,11 @@ class Config:
                 self.data["servers"][0]["name"] if self.data["servers"] else None
             )
         self.save()
+        if not _keep_record:
+            # After the save: a record dropped for a server that stays would
+            # send its pairs back to bootstrap (third audit, #6).
+            from nasync.core import state
+            state.forget_server(self.config_dir, name)
 
     def list_servers(self) -> list:
         return self.data.get("servers", [])
@@ -926,7 +943,15 @@ class Config:
             raise ValueError(
                 f"Unknown sync mode '{mode}'. Use one of: {', '.join(SYNC_MODES)}."
             )
+        before = self.get_sync_mode(server)
         self._write_server_settings(server, sync_mode=mode)
+        if mode == "update" and before != "update":
+            # Whatever is deleted locally from now on stays on the NAS; the
+            # next mirror run deletes all of it at once, so it is a first
+            # mirror run again and asks at 50+ (third audit, #2).
+            from nasync.core import state
+            state.reset_mirrored(self.config_dir,
+                                 server or self.get_active_server_name())
         return mode
 
     # ------------------------------------------------------------------ #

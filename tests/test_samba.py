@@ -94,6 +94,12 @@ class _FakeSMB:
         self.removed.append(path)
 
     def rename(self, src, dst, **kwargs):
+        # Like a server: onto a free name the bytes move; onto a taken one
+        # it refuses (the swap's fallbacks are what handle that).
+        if src in self.written:
+            if dst in self.written:
+                raise OSError("STATUS_OBJECT_NAME_COLLISION")
+            self.written[dst] = self.written.pop(src)
         self.renamed.append((src, dst))
 
     def replace(self, src, dst, **kwargs):
