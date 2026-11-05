@@ -876,11 +876,12 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._cancel_button.set_sensitive(busy)
 
     def start_transfer(self, direction: str, dry_run: bool,
-                       confirmed: list = None) -> None:
+                       confirmed: dict = None) -> None:
         """Run a sync, dry run or restore.
 
-        `confirmed` names pairs whose mirror run was held back and that a
-        person has now agreed may delete; only those are run, with that yes.
+        `confirmed` maps pairs whose run was held back to the fingerprint of
+        what the person saw and agreed to; only those are run, with that yes —
+        which covers exactly those changes, not any found since.
         """
         if self._busy or self._bg_status is not None:
             return
@@ -914,8 +915,9 @@ class NasyncWindow(Adw.ApplicationWindow):
         def work():
             if confirmed:
                 merged = None
-                for name in confirmed:
-                    result = syncer.sync_pair(name, allow_mass_delete=True)
+                for name, fingerprint in confirmed.items():
+                    result = syncer.sync_pair(
+                        name, allow_mass_delete={name: fingerprint})
                     merged = _merge_results(merged, result)
                     if result.get("cancelled"):
                         break
@@ -953,8 +955,10 @@ class NasyncWindow(Adw.ApplicationWindow):
             self._errors.append(text.lstrip("❌ "))
         elif text.startswith("🛑"):
             self._errors.append(text.lstrip("🛑 "))
-        elif text.startswith("!") and "name illegal on SMB" not in text:
-            self._errors.append(text.lstrip("! "))
+        elif text.startswith("!") or text.startswith("⚠"):
+            # Skipped files are listed too: each one is a file the backup
+            # doesn't have, and the reason is the thing to act on.
+            self._errors.append(text.lstrip("!⚠ "))
 
     def show_error_details(self) -> None:
         dialog = Adw.AlertDialog(heading="Transfer errors",
@@ -1078,8 +1082,12 @@ class NasyncWindow(Adw.ApplicationWindow):
                  f"{result.get('deleted', 0)} removed"]
         if result.get("moved"):
             parts.append(f"{result['moved']} moved")
+        if result.get("conflicts"):
+            parts.append(f"{result['conflicts']} changed on the NAS, kept as copies")
+        if result.get("foreign"):
+            parts.append(f"{result['foreign']} on the NAS left alone")
         if unsupported:
-            parts.append(f"{unsupported} skipped (name illegal on SMB)")
+            parts.append(f"{unsupported} skipped (see details)")
         held = [r for r in result.get("refused", []) if not r.get("dry_run")]
         would_hold = [r for r in result.get("refused", []) if r.get("dry_run")]
         if held:
@@ -1091,6 +1099,8 @@ class NasyncWindow(Adw.ApplicationWindow):
             parts.append(f"{len(result['overlapping'])} skipped (shared folder)")
         self._progress_detail.set_label("  ·  ".join(parts))
         self._details_button.set_visible(bool(self._errors))
+        self._details_button.set_label("Show details" if not problems
+                                       else "Show errors")
         self.toast("Sync complete" if not problems
                    else f"Finished with {problems} error(s)")
         self._notify_unattended(
@@ -1107,21 +1117,30 @@ class NasyncWindow(Adw.ApplicationWindow):
         touching the server. Saying so is half the point of the dialog — the
         other half is that the default answer keeps the files.
         """
-        lines = [f"• '{r['pair']}' would delete {r['deletes']:,} of "
-                 f"{r['total']:,} file(s) in its server folder." for r in held]
+        def what(r):
+            parts = []
+            if r.get("deletes"):
+                parts.append(f"delete {r['deletes']:,}")
+            if r.get("overwrites"):
+                parts.append(f"overwrite {r['overwrites']:,}")
+            return " and ".join(parts) or "change"
+        lines = [f"• '{r['pair']}' would {what(r)} of {r['total']:,} file(s) "
+                 f"in its server folder." for r in held]
         dialog = Adw.AlertDialog(
-            heading="Delete files on the server?",
-            body="\n".join(lines) + "\n\nNothing has been deleted yet. This "
-                 "usually means a folder moved, a disk didn't mount, or a pair "
-                 "points somewhere unexpected. Dry run lists every file first.")
+            heading="Delete or replace files on the server?",
+            body="\n".join(lines) + "\n\nNothing has been deleted or replaced "
+                 "yet, and new files were backed up. This usually means a folder "
+                 "moved, a disk didn't mount, or a pair points somewhere "
+                 "unexpected — or, for replaced files, that something rewrote "
+                 "them all. Dry run lists every file first.")
         dialog.add_response("keep", "Keep Them")
         dialog.add_response("delete", "Delete")
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("keep")
         dialog.set_close_response("keep")
-        names = [r["pair"] for r in held]
+        answer = {r["pair"]: r.get("fingerprint") for r in held}
         dialog.connect("response", lambda _d, response: (
-            self.start_transfer("push", False, confirmed=names)
+            self.start_transfer("push", False, confirmed=answer)
             if response == "delete" else None))
         dialog.present(self)
 
@@ -1136,6 +1155,11 @@ class NasyncWindow(Adw.ApplicationWindow):
         """
         if self._busy:
             return True                      # our own run; its progress is up
+        # Settings changed by the CLI or the service (or another window) are
+        # shown, and — since every change re-reads first — never undone.
+        if self.config.refresh():
+            self.refresh_servers()
+            self.refresh_summary()
         status = activity.read_status(self.config.config_dir)
         if status is not None and status.get("pid") == os.getpid():
             status = None
@@ -1197,6 +1221,28 @@ class NasyncWindow(Adw.ApplicationWindow):
             self._progress_bar.set_fraction(1.0)
         self._progress_detail.set_label(activity.describe_last(last))
 
+    def _offer_trust(self, message: str) -> None:
+        """A different machine answered at the NAS's address. Ask, don't guess."""
+        name = self.config.get_active_server_name()
+        advice = ("\n\nIf you replaced or reinstalled the NAS, trust it. If "
+                  "you're on another network, don't — NASync will sync once "
+                  "you're home.")
+        dialog = Adw.AlertDialog(heading="Is this your NAS?",
+                                 body=message.split(" If you replaced")[0] + advice)
+        dialog.add_response("cancel", "Not My NAS")
+        dialog.add_response("trust", "Trust It")
+        dialog.set_response_appearance("trust", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def answered(_dialog, response):
+            if response == "trust" and name:
+                # Forgotten, so the next connection learns the new identity.
+                self.config.set_server_identity(name, None)
+                self.toast(f"'{name}' will trust this NAS on the next sync")
+        dialog.connect("response", answered)
+        dialog.present(self)
+
     def _repair_installs(self) -> None:
         """Repoint a launcher or service that points at a NASync that's gone.
 
@@ -1227,6 +1273,9 @@ class NasyncWindow(Adw.ApplicationWindow):
     def _on_transfer_error(self, exc) -> None:
         self._set_busy(False)
         self._cancel_event = None
+        from nasync.core.samba import ServerIdentityChanged
+        if isinstance(exc, ServerIdentityChanged):
+            self._offer_trust(str(exc))
         self._progress_title.set_label("Failed")
         self._progress_detail.set_label(str(exc))
         self._progress_bar.set_fraction(0.0)

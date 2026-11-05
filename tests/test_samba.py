@@ -51,6 +51,7 @@ class _FakeSMB:
         self._volume = volume        # (total, caller_available, actual_available)
         self.removed = []
         self.renamed = []
+        self.replaced = []
         self.removed_dirs = []
         self.stamped = {}            # UNC path -> (atime, mtime) set on it
         self.made_dirs = []
@@ -93,6 +94,13 @@ class _FakeSMB:
     def rename(self, src, dst, **kwargs):
         self.renamed.append((src, dst))
 
+    def replace(self, src, dst, **kwargs):
+        # Uploads land under a temporary name and are renamed into place; a
+        # test asserting on `written` cares about where the bytes ended up.
+        if src in self.written:
+            self.written[dst] = self.written.pop(src)
+        self.replaced.append((src, dst))
+
     def rmdir(self, path, **kwargs):
         self.removed_dirs.append(path)
 
@@ -134,9 +142,16 @@ class _CM:
 
 
 def _client(fake, **kwargs):
-    """Build a client wired to a fake SMB layer."""
+    """Build a client wired to a fake SMB layer — and no network at all.
+
+    The identity check opens its own connection before any credentials are
+    sent; unanswered, it would wait ten seconds on 1.2.3.4 in every test that
+    connects.
+    """
     samba_module.smbclient = fake
-    return SAMBAClient("1.2.3.4", "user", "pass", "share", **kwargs)
+    client = SAMBAClient("1.2.3.4", "user", "pass", "share", **kwargs)
+    client.server_identity = getattr(fake, "identity", lambda: None)
+    return client
 
 
 # --------------------------------------------------------------------------- #
@@ -968,14 +983,10 @@ def test_an_empty_local_folder_is_never_mirrored():
     client = _client(fake)
     client._remote_file_map = lambda base, **_: {"keep.txt": 1, "also.txt": 2}
     with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            client.sync_directory(tmpdir, "/base", direction="push",
-                                  allow_mass_delete=True)
-        except MirrorRefused as e:
-            assert not e.confirmable
-        else:
-            raise AssertionError("an empty source was mirrored")
+        stats = client.sync_directory(tmpdir, "/base", direction="push",
+                                      allow_mass_delete=True)
     assert fake.removed == [], fake.removed
+    assert stats["held"] and not stats["held"]["confirmable"], stats
 
 
 def test_a_mass_delete_waits_for_a_yes():
@@ -985,17 +996,66 @@ def test_a_mass_delete_waits_for_a_yes():
     client._remote_file_map = lambda base, **_: dict(remote)
     with tempfile.TemporaryDirectory() as tmpdir:
         Path(tmpdir, "f0.bin").write_text("x")
-        try:
-            client.sync_directory(tmpdir, "/base", direction="push")
-        except MirrorRefused as e:
-            assert e.confirmable and e.deletes == len(remote) - 1, e
-        else:
-            raise AssertionError("a 99% delete went through unasked")
-        assert fake.removed == [] and fake.written == {}, "touched before refusing"
+        Path(tmpdir, "new.bin").write_text("brand new")
+        stats = client.sync_directory(tmpdir, "/base", direction="push")
+        held = stats["held"]
+        assert held and held["confirmable"] and held["deletes"] == len(remote) - 1
+        assert fake.removed == [], "deleted before anyone said yes"
+        assert "\\\\1.2.3.4\\share\\base\\new.bin" in fake.written, \
+            "a held-back question must not stop new files being backed up"
 
+        # A yes for exactly what was shown lets exactly that go ahead…
         client.sync_directory(tmpdir, "/base", direction="push",
-                              allow_mass_delete=True)
+                              allow_mass_delete=held["fingerprint"])
     assert len(fake.removed) == len(remote) - 1
+
+
+def test_a_yes_does_not_cover_deletions_found_afterwards():
+    plan = {"delete": [f"f{i}" for i in range(60)], "overwrites": []}
+    try:
+        SAMBAClient.check_mirror(plan, 5, 70)
+    except MirrorRefused as e:
+        seen = e.fingerprint
+    plan["delete"].append("one-more")
+    try:
+        SAMBAClient.check_mirror(plan, 5, 70, allow_mass_delete=seen)
+    except MirrorRefused:
+        pass
+    else:
+        raise AssertionError("a yes for 60 files allowed 61")
+
+
+def test_mass_overwrites_are_held_like_mass_deletes():
+    """Ransomware rewrites every file; one unattended run would push it all."""
+    plan = {"delete": [], "overwrites": [f"f{i}" for i in range(200)]}
+    try:
+        SAMBAClient.check_mirror(plan, 200, 200)
+    except MirrorRefused as e:
+        assert e.hold_overwrites and not e.hold_deletes
+    else:
+        raise AssertionError("200 of 200 overwritten without asking")
+
+
+def test_unattended_runs_hold_back_at_a_lower_share():
+    plan = {"delete": [f"f{i}" for i in range(55)], "overwrites": []}
+    SAMBAClient.check_mirror(plan, 60, 115)                      # 48%: asked? no
+    try:
+        SAMBAClient.check_mirror(plan, 60, 115, unattended=True)
+    except MirrorRefused:
+        pass
+    else:
+        raise AssertionError("an unplugged disk's 48% went through unattended")
+
+
+def test_the_first_recorded_run_asks_before_deleting_many():
+    plan = {"delete": [f"old{i}" for i in range(60)], "overwrites": []}
+    SAMBAClient.check_mirror(plan, 1000, 1060)                   # 6%: fine
+    try:
+        SAMBAClient.check_mirror(plan, 1000, 1060, bootstrap=True)
+    except MirrorRefused as e:
+        assert "first sync" in str(e)
+    else:
+        raise AssertionError("bootstrap deleted 60 unrecorded files unasked")
 
 
 def test_small_or_partial_deletes_are_not_questioned():
@@ -1015,7 +1075,7 @@ def test_a_dry_run_says_where_a_real_run_would_stop():
         stats = client.sync_directory(tmpdir, "/base", direction="push",
                                       dry_run=True)
     assert stats["refused"], stats
-    assert any("would stop here" in line for line in lines), lines
+    assert any("would hold back" in line for line in lines), lines
 
 
 def test_leftover_empty_folders_go_even_when_nothing_else_changed():
@@ -1056,7 +1116,7 @@ def test_restore_fetches_a_same_size_file_that_is_newer_on_the_server():
         stats = client.sync_directory(tmpdir, "/base", direction="pull",
                                       dry_run=True)
     assert any("↓ old.txt" in line for line in lines), lines
-    assert stats["skipped"] == 1, "a newer local copy must not be overwritten"
+    assert stats["kept_local"] == 1, "a newer local copy must not be overwritten"
 
 
 def test_a_case_rename_the_server_refuses_goes_through_a_temporary_name():
@@ -1075,3 +1135,145 @@ def test_a_case_rename_the_server_refuses_goes_through_a_temporary_name():
     client._rename_case("\\\\s\\img.jpg", "\\\\s\\IMG.jpg")
     temp = f"\\\\s\\img.jpg.nasync-case-{os.getpid()}"
     assert fake.renamed == [("\\\\s\\img.jpg", temp), (temp, "\\\\s\\IMG.jpg")]
+
+
+# --------------------------------------------------------------------------- #
+# 0.21.0 — decisions made with a record of what was uploaded
+# --------------------------------------------------------------------------- #
+from nasync.core.state import Entry  # noqa: E402
+
+
+def _rec(size, mtime, remote_size=None, remote_mtime=None, sha="h", kept=False):
+    return Entry(size, mtime, size if remote_size is None else remote_size,
+                 mtime if remote_mtime is None else remote_mtime, sha, 0o644, kept)
+
+
+def _rplan(local, remote, mtimes, record, mirror=True, hashes=None,
+           remote_hashes=None, **kw):
+    return SAMBAClient.plan_push(
+        _local(local), remote, mtimes, set(kw.pop("dirs", ())), mirror,
+        record=record, bootstrap=kw.pop("bootstrap", False),
+        local_hash=lambda rel: (hashes or {}).get(rel),
+        remote_hash=lambda rel: (remote_hashes or {}).get(rel), **kw)
+
+
+def test_an_older_version_put_back_is_a_change():
+    plan = _rplan({"r.txt": (9, 1_000.0)}, {"r.txt": 9}, {"r.txt": 5_000.0},
+                  {"r.txt": _rec(9, 5_000.0)}, hashes={"r.txt": "older"})
+    assert plan["upload"] == [("r.txt", "r.txt")], plan
+
+
+def test_a_touched_file_with_the_same_bytes_is_not_sent_again():
+    plan = _rplan({"t.bin": (9, 7_000.0)}, {"t.bin": 9}, {"t.bin": 5_000.0},
+                  {"t.bin": _rec(9, 5_000.0, sha="same")}, hashes={"t.bin": "same"})
+    assert plan["upload"] == [] and plan["unchanged"] == ["t.bin"], plan
+    assert plan["learn"]["t.bin"].mtime == 7_000.0, "the new time is remembered"
+
+
+def test_a_file_changed_on_the_nas_is_set_aside_not_overwritten():
+    plan = _rplan({"s.txt": (4, 9_000.0)}, {"s.txt": 30}, {"s.txt": 8_000.0},
+                  {"s.txt": _rec(4, 5_000.0)})
+    assert plan["conflicts"] == ["s.txt"] and plan["upload"] == [("s.txt", "s.txt")]
+
+
+def test_a_dst_hour_on_the_nas_is_not_a_change():
+    plan = _rplan({"f": (4, 5_000.0)}, {"f": 4}, {"f": 5_000.0 + 3600},
+                  {"f": _rec(4, 5_000.0)})
+    assert plan["conflicts"] == [] and plan["upload"] == [], plan
+
+
+def test_a_same_size_nas_change_is_checked_by_checksum():
+    unchanged = _rplan({"f": (4, 5_000.0)}, {"f": 4}, {"f": 9_000.0},
+                       {"f": _rec(4, 5_000.0, sha="abc")}, remote_hashes={"f": "abc"})
+    assert unchanged["conflicts"] == [], unchanged
+    edited = _rplan({"f": (4, 5_000.0)}, {"f": 4}, {"f": 9_000.0},
+                    {"f": _rec(4, 5_000.0, sha="abc")}, remote_hashes={"f": "xyz"})
+    assert edited["conflicts"] == ["f"], edited
+
+
+def test_files_someone_else_put_on_the_nas_are_never_deleted():
+    plan = _rplan({"mine": (1, 1.0)}, {"mine": 1, "theirs.jpg": 5},
+                  {"mine": 1.0, "theirs.jpg": 3.0}, {"mine": _rec(1, 1.0)})
+    assert plan["delete"] == [] and plan["foreign"] == ["theirs.jpg"], plan
+
+
+def test_before_the_first_recorded_sync_old_rules_apply():
+    plan = _rplan({"mine": (1, 1.0)}, {"mine": 1, "old.jpg": 5},
+                  {"mine": 1.0, "old.jpg": 3.0}, {}, bootstrap=True)
+    assert plan["delete"] == ["old.jpg"] and plan["foreign"] == [], plan
+
+
+def test_a_recorded_file_deleted_locally_is_deleted_unless_the_nas_changed_it():
+    record = {"gone": _rec(3, 1.0), "edited": _rec(3, 1.0)}
+    plan = _rplan({"keep": (1, 1.0)}, {"keep": 1, "gone": 3, "edited": 99},
+                  {"keep": 1.0, "gone": 1.0, "edited": 50.0},
+                  {**record, "keep": _rec(1, 1.0)})
+    assert plan["delete"] == ["gone"] and plan["kept"] == ["edited"], plan
+
+
+def test_conflict_copies_are_never_deleted():
+    plan = _rplan({"a": (1, 1.0)}, {"a": 1, "a (NAS copy x)": 7},
+                  {"a": 1.0, "a (NAS copy x)": 2.0},
+                  {"a": _rec(1, 1.0), "a (NAS copy x)": _rec(None, None, 7, 2.0,
+                                                             kept=True)})
+    assert plan["delete"] == [] and plan["foreign"] == [], plan
+
+
+def test_a_move_is_proven_by_checksum():
+    plan = _rplan({"new/x.bin": (50, 9_999.0)}, {"old/x.bin": 50},
+                  {"old/x.bin": 1.0}, {"old/x.bin": _rec(50, 1.0, sha="digest")},
+                  hashes={"new/x.bin": "digest"})
+    assert plan["moves"] == [("old/x.bin", "new/x.bin")], plan
+    other = _rplan({"new/x.bin": (50, 9_999.0)}, {"old/x.bin": 50},
+                   {"old/x.bin": 1.0}, {"old/x.bin": _rec(50, 1.0, sha="digest")},
+                   hashes={"new/x.bin": "different"})
+    assert other["moves"] == [] and other["delete"] == ["old/x.bin"], other
+
+
+def test_an_unreadable_folder_protects_its_backup():
+    plan = _rplan({"ok": (1, 1.0)}, {"ok": 1, "private/a": 1, "private/b": 1},
+                  {"ok": 1.0, "private/a": 1.0, "private/b": 1.0},
+                  {"ok": _rec(1, 1.0), "private/a": _rec(1, 1.0),
+                   "private/b": _rec(1, 1.0)},
+                  dirs={"private"}, protected=["private"])
+    assert plan["delete"] == [] and plan["stale"] == [], plan
+
+
+def test_our_own_interrupted_uploads_are_cleaned_up():
+    plan = _rplan({"a": (1, 1.0)}, {"a": 1, ".a.nasync-part-123": 1},
+                  {"a": 1.0}, {"a": _rec(1, 1.0)})
+    assert plan["temps"] == [".a.nasync-part-123"] and plan["foreign"] == []
+
+
+def test_empty_local_folders_are_created_on_the_server():
+    plan = _rplan({}, {}, {}, {}, local_dirs={"empty", "empty/nested"})
+    assert plan["mkdirs"] == ["empty", "empty/nested"]
+
+
+def test_names_differing_only_in_case_are_reported_not_collided():
+    client = _client(_FakeSMB())
+    with tempfile.TemporaryDirectory() as tmpdir:
+        Path(tmpdir, "README.txt").write_text("a")
+        Path(tmpdir, "readme.txt").write_text("b")
+        scan = client._scan_local(tmpdir)
+    assert list(scan.files) == ["README.txt"]
+    assert scan.unsupported[0][0] == "readme.txt" and "letter case" in scan.unsupported[0][1]
+
+
+def test_a_symlinked_folder_is_listed_with_its_reason():
+    client = _client(_FakeSMB())
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.makedirs(os.path.join(tmpdir, "real"))
+        os.symlink(os.path.join(tmpdir, "real"), os.path.join(tmpdir, "link"))
+        os.symlink(os.path.join(tmpdir, "nowhere"), os.path.join(tmpdir, "dead"))
+        scan = client._scan_local(tmpdir)
+    reasons = dict(scan.unsupported)
+    assert "not followed" in reasons["link"] and "broken" in reasons["dead"]
+
+
+def test_conflict_copy_names_never_collide():
+    from nasync.core.samba import _conflict_name
+    taken = {"docs/report (nas copy 2026-11-05 1925).docx"}
+    assert _conflict_name("docs/report.docx", "2026-11-05 1925", taken) == \
+        "docs/report (NAS copy 2026-11-05 1925 2).docx"
+    assert _conflict_name("README", "d", set()) == "README (NAS copy d)"

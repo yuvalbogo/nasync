@@ -164,6 +164,8 @@ def describe_last(last: dict) -> str:
              f"{outcome.get('deleted', 0)} removed"]
     if outcome.get("moved"):
         parts.append(f"{outcome['moved']} moved")
+    if outcome.get("conflicts"):
+        parts.append(f"{outcome['conflicts']} changed on the NAS, kept as copies")
     if outcome.get("cancelled"):
         parts.append("cancelled")
     problems = outcome.get("failed", 0) + outcome.get("errors", 0)
@@ -259,7 +261,7 @@ class Activity:
         """Record what the run did, for whoever looks after it is over."""
         summary = {key: result.get(key, 0) for key in
                    ("ok", "failed", "transferred", "skipped", "deleted",
-                    "moved", "errors")}
+                    "moved", "errors", "conflicts", "foreign")}
         summary["cancelled"] = bool(result.get("cancelled"))
         summary["refused"] = [r.get("pair") for r in result.get("refused", [])]
         _write_json(_path(self.config_dir, LAST_NAME),

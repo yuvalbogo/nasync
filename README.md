@@ -215,29 +215,47 @@ you deleted locally since the last sync:
 | **Mirror** (default) | The server is made to match your local folders exactly. Server-only files are **deleted**. | The server should reflect your machine — deleting locally means deleting everywhere. |
 | **Update** | New and changed files are copied. Server-only files are left alone; **nothing is deleted**. | The server is an archive that should accumulate, or you want a delete-proof backup. |
 
-**Restore is never destructive in either mode.** Pulling from the server adds
-and overwrites local files; local files the server doesn't have are left alone.
+**Restore is never destructive in either mode.** It adds missing files and
+replaces older ones, but never overwrites a local file you changed since it was
+last backed up (it says which ones it kept), and never deletes anything local.
+It restores modification times, and permissions on the machine that made the
+backup. A server folder that doesn't exist is an error, not "0 files restored".
 
 **What mirror can delete is bounded by the [sync root](#the-sync-root)** — it
 only ever removes things inside that folder, so anything beside it on the share
 is out of reach.
 
-**Mirror refuses runs that look like a mistake** (since 0.20.0):
+**Nothing on the NAS is destroyed without a copy surviving** (since 0.21.0).
+NASync keeps a record of what it uploaded, which lets it tell apart things
+that look the same from outside:
+
+- **A file changed on the NAS** since NASync put it there (from another
+  computer, say) is never overwritten. It is renamed to
+  `name (NAS copy 2026-11-05 1925).ext` and kept, then your copy is uploaded.
+- **A file someone else put on the NAS** is never deleted by mirror — mirror
+  deletes what *you* deleted. The first sync after upgrading can't tell yet,
+  so it asks before deleting 50 or more files.
+- **Interrupted uploads** never leave a half-written file where the good copy
+  was: files are written under a temporary name and renamed into place.
+
+**Runs that look like a mistake wait for you:**
 
 - **An empty local folder is never mirrored** onto a server folder that has
   files. It almost always means the folder moved, a disk didn't mount, or a
-  pair points at the wrong place — and the price of being wrong is the whole
-  backup. Nothing is changed; the run says why.
-- **Deleting more than half of a folder's server files** (and at least 50 of
-  them) waits for a yes. `nasync sync` asks; the desktop app shows a
-  *Delete files on the server?* dialog whose default keeps them; the
-  background service holds the run back and sends a *Sync held back*
-  notification. To say yes from a script: `nasync sync --allow-mass-delete`.
-- **Each pair needs a server folder of its own.** Two pairs pointing at the
-  same folder — or one inside the other — would each delete the other's files
-  on every mirror run, so adding or editing such a pair is refused. Pairs
-  like that in an older config are skipped by sync, and flagged by
-  `nasync list`, `nasync status` and the app, until they're pointed apart.
+  pair points at the wrong place.
+- **Deleting or overwriting more than half of a folder's server files** (50 or
+  more) waits for a yes — a fifth, when the background service runs it with
+  nobody watching. The run still backs up new files; only the destructive part
+  waits. `nasync sync` asks; the app shows a dialog whose default keeps the
+  files; the background service sends a *Sync held back* notification. A yes
+  covers exactly the files that were shown. From a script:
+  `nasync sync --allow-mass-delete`.
+- **A folder or file that can't be read** is never taken for deleted: its
+  backup is left alone, and it is reported.
+- **Each pair needs a server folder of its own** — on one server entry, or on
+  two entries that reach the same NAS. Overlapping pairs are refused when
+  added, skipped by sync if an older config has them, and flagged by
+  `nasync list`, `nasync status` and the app.
 
 Check what a switch to mirror would do before making it:
 
@@ -332,7 +350,12 @@ nasync cancel    # stop whichever sync is running
 
 Live sync never drops a change: an edit made while another sync is running,
 or while you're away from the NAS's network, is remembered and synced as soon
-as it can be.
+as it can be — and only the folder that changed is synced. If changes wait for
+more than an hour, you're told why. A folder added while the service runs is
+watched straight away; one that can't be watched (the system limit on watched
+folders) is synced every 15 minutes instead, and you're told. A scheduled sync
+the machine slept through for a whole day runs at the next chance, and a
+scheduled server with no backup for three days sends a notification.
 
 ### The background service
 
@@ -898,6 +921,7 @@ nasync sync
 | `nasync remove <name> [--server NAME]` | Remove a sync pair |
 | `nasync sync [--pair NAME] [--mode mirror\|update] [--allow-mass-delete]` | Incremental sync to server |
 | `nasync cancel` | Stop the sync that is running, wherever it was started |
+| `nasync trust [--server NAME]` | Trust the NAS now at a server's address, after replacing it |
 | `nasync root [PATH] [--server NAME]` | Show or set a server's [sync root](#the-sync-root) |
 | `nasync mode [mirror\|update] [--server NAME]` | Show or set a server's [sync mode](#sync-mode) |
 | `nasync restore [--pair NAME]` | Restore from server (never deletes locally) |
@@ -919,10 +943,24 @@ nasync sync
   on the first sync, without being sent again. Whether files removed locally
   are also removed on the server depends on the [sync mode](#sync-mode):
   **mirror** (default) deletes them, **update** keeps them.
+- **The record** (`sync-state.db` in the config directory) remembers, per
+  pair, what was uploaded: sizes, times, a checksum taken while uploading, and
+  permissions. It is how NASync catches an *older* version put back, ignores a
+  file that was only touched, recognises changes made on the NAS, and tells a
+  file you deleted from one someone else added. See
+  [DATA_SAFETY.md](DATA_SAFETY.md).
 - **Renames are renames.** A folder you rename is moved on the server rather
   than uploaded again in full and deleted, and a file renamed only in letter
   case (`img.jpg` → `IMG.jpg`) is renamed rather than deleted — SMB shares
   treat those as the same name.
+- **Nothing is skipped silently.** Names SMB can't store, two names that
+  differ only in letter case (an SMB share can't keep both), symlinked folders
+  and unreadable files are listed with the reason. Empty folders are created
+  on the server too.
+- **Your password only goes to your NAS.** NASync remembers which machine the
+  NAS is the first time it connects, and won't send credentials to a different
+  one at the same address — on a strange network that happens to use your
+  home's addresses. After replacing the NAS: `nasync trust`.
 - **Pull (restore)**: downloads files from the server that are missing, a
   different size, or newer there. A local copy newer than the server's is
   left alone, and nothing local is ever deleted, in either mode.

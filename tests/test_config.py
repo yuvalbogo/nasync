@@ -446,7 +446,7 @@ _PRE_0_18 = {
 }
 
 
-def test_migration_gives_the_old_settings_to_the_active_server_only():
+def test_migration_gives_triggers_to_the_active_server_and_the_mode_to_all():
     """Nothing that wasn't syncing by itself before the upgrade starts doing so
     because of it — inheriting a trigger would begin unattended mirror syncs on
     a NAS nobody asked to automate."""
@@ -464,7 +464,10 @@ def test_migration_gives_the_old_settings_to_the_active_server_only():
         work = c.get_automation("work")
         assert work["live_sync"] is False and work["scheduled_sync"] is False
         assert work["scheduled_time"] == "02:00"        # the default, not 03:30
-        assert c.get_sync_mode("work") == "mirror"      # the default, not update
+        # But the *mode* governed every server before 0.18.0, so every server
+        # keeps it. Until 0.21.0 this said "mirror": a colleague's update-mode
+        # share became a mirror one on upgrade, and its next sync deleted.
+        assert c.get_sync_mode("work") == "update"
         assert c.automated_servers() == ["home"]
 
         # `background` is app-wide and stays where it was.
@@ -474,7 +477,7 @@ def test_migration_gives_the_old_settings_to_the_active_server_only():
         # One source of truth afterwards: the global copies are gone.
         assert "sync_mode" not in c.data
         assert "live_sync" not in c.data.get("automation", {})
-        print("✅ test_migration_gives_the_old_settings_to_the_active_server_only passed")
+        print("✅ migration test passed")
 
 
 def test_migration_is_idempotent_and_does_not_undo_later_changes():
@@ -847,3 +850,56 @@ def test_overlaps_already_in_an_old_config_are_found(configured_config):
     config.get_pairs().append({"name": "icons", "local": "/x", "server": "dest"})
     config.get_pairs().append({"name": "ok", "local": "/y", "server": "apart"})
     assert config.overlapping_pairs() == {"pair": ["icons"], "icons": ["pair"]}
+
+
+def test_a_change_made_elsewhere_is_not_undone_by_a_long_open_config(config_home):
+    """The app holds one Config for hours; the CLI writes meanwhile."""
+    app = Config()
+    app.add_or_update_server("nas", "10.0.0.2", "u", "p", "share", 445)
+    app.add_pair("/tmp", "docs", "docs", server="nas")
+
+    cli = Config()
+    cli.set_sync_mode("update", server="nas")
+    cli.remove_pair("docs", server="nas")
+
+    app.set_notifications(False)                 # any unrelated toggle
+    fresh = Config()
+    assert fresh.get_sync_mode("nas") == "update", "the CLI's mode was undone"
+    assert fresh.get_pairs("nas") == [], "a removed pair came back"
+    assert fresh.get_notifications() is False
+
+
+def test_a_save_is_never_half_written(config_home):
+    import os
+    config = Config()
+    config.add_or_update_server("nas", "10.0.0.2", "u", "p", "share", 445)
+    leftovers = [n for n in os.listdir(config.config_dir) if n.endswith(".tmp")]
+    assert leftovers == []
+
+
+def test_the_service_never_prompts_for_the_keyring(config_home, monkeypatch):
+    from nasync.system import vault
+    asked = []
+    monkeypatch.setattr(vault, "is_envelope", lambda data: True)
+    monkeypatch.setattr(vault, "unseal",
+                        lambda data, allow_prompt=True: asked.append(allow_prompt) or {})
+    config = Config()
+    import json
+    config.creds_file.write_text(json.dumps({"sealed": 1}))
+    config._creds_cache = None
+    unattended = Config(interactive=False)
+    unattended._creds_cache = None
+    unattended._read_creds()
+    assert asked[-1] is False
+
+
+def test_switching_the_schedule_on_waits_for_its_slot(configured_config):
+    import datetime
+    from nasync.core.automation import scheduled_run_is_due
+    config = configured_config
+    config.set_automation(last_scheduled_run="2025-01-01", server="nas")
+    config.set_automation(scheduled_sync=True, scheduled_time="23:59", server="nas")
+    settings = config.get_automation("nas")
+    early = datetime.datetime.combine(datetime.date.today(), datetime.time(8, 0))
+    assert not scheduled_run_is_due(settings["scheduled_time"],
+                                    settings["last_scheduled_run"], now=early)

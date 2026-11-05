@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import shutil
@@ -104,6 +105,31 @@ def normalize_remote(path: str) -> str:
     return "/".join(parts)
 
 
+def _mutator(method):
+    """Apply a change to the config *as it is on disk now*, then save it.
+
+    The desktop app holds one `Config` for as long as it is open, and the CLI
+    and the background service write the same file meanwhile. Until 0.21.0 a
+    change in the app was applied to its in-memory copy from whenever it
+    opened and saved whole — so a mode switched to "update" from a terminal,
+    a pair removed, a root moved, all came silently back the next time
+    anything was toggled in the app, and the service mirrored with them.
+
+    Only the outermost call re-reads: a mutator that calls another must not
+    discard the half-made change it is in the middle of.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if not self._mutating and not self._initialising:
+            self.refresh()
+        self._mutating += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._mutating -= 1
+    return wrapper
+
+
 def destinations_overlap(first: str, second: str) -> bool:
     """True when one server folder is the other, or lies inside it.
 
@@ -176,7 +202,15 @@ class Config:
     silently retarget folders at a NAS they were never meant for.
     """
 
-    def __init__(self):
+    def __init__(self, interactive: bool = True):
+        self._mutating = 0
+        self._initialising = True
+        self._disk_stamp = None
+        #: May reading the saved passwords prompt to unlock a keyring? Not in
+        #: the background service: a prompt at 02:00 blocks the run for a
+        #: minute, and the empty password it fell back to was then reported
+        #: as "Authentication failed. Check username and password."
+        self.interactive = interactive
         self.config_dir = Path(appdirs.user_config_dir("nasync"))
         self.config_file = self.config_dir / "config.json"
         self.creds_file = self.config_dir / ".creds"
@@ -193,6 +227,7 @@ class Config:
         self._load()
         self._migrate_legacy()
         self._migrate_creds()
+        self._initialising = False
 
     def _import_from_host(self) -> bool:
         """Adopt a pip/pipx install's settings the first time we run sandboxed.
@@ -241,12 +276,20 @@ class Config:
     # ------------------------------------------------------------------ #
     # Load / save
     # ------------------------------------------------------------------ #
+    def _stamp(self):
+        try:
+            info = self.config_file.stat()
+            return (info.st_mtime_ns, info.st_size, info.st_ino)
+        except OSError:
+            return None
+
     def _load(self):
         if self.config_file.exists():
             with open(self.config_file) as f:
                 self.data = json.load(f)
         else:
             self.data = {}
+        self._disk_stamp = self._stamp()
         self.data.setdefault("servers", [])
         self.data.setdefault("active_server", None)
         # {server name: [pair, ...]}. Pairs belong to one server; see
@@ -266,9 +309,26 @@ class Config:
         self._creds_cache = None
         self._load()
 
+    def refresh(self) -> bool:
+        """Re-read config.json if another process changed it. True if it did."""
+        if self._stamp() == self._disk_stamp:
+            return False
+        self.reload()
+        return True
+
     def save(self):
-        with open(self.config_file, "w") as f:
+        """Write atomically: a crash mid-write must not leave half a config.
+
+        A truncated config.json reads as *no* config — no servers, no pairs —
+        and the next save would make that permanent.
+        """
+        temp = self.config_file.with_name(f".{self.config_file.name}.{os.getpid()}.tmp")
+        with open(temp, "w") as f:
             json.dump(self.data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp, self.config_file)
+        self._disk_stamp = self._stamp()
 
     def _migrate_legacy(self):
         """Convert the old single-server format to the named-servers model."""
@@ -318,6 +378,14 @@ class Config:
             # fact. Re-running must not overwrite a since-changed setting.
             for key, value in movable.items():
                 target.setdefault(key, value)
+        # The mode is different from the triggers: it governed *every* server
+        # before 0.18.0, so every server keeps it. Giving it to the active one
+        # alone turned a colleague's "update" share into a mirror one, whose
+        # next sync deleted their files. An upgrade must never make a server
+        # more destructive than it was.
+        if "sync_mode" in movable:
+            for server in self.data.get("servers", []):
+                server.setdefault("sync_mode", movable["sync_mode"])
 
         # Dropped whether or not there was a server to receive them: keeping
         # them would leave two sources of truth, and with no servers there is
@@ -375,7 +443,7 @@ class Config:
     # ------------------------------------------------------------------ #
     # Credentials (name -> password), stored 0600
     # ------------------------------------------------------------------ #
-    def _read_creds(self, allow_prompt: bool = True) -> dict:
+    def _read_creds(self, allow_prompt: bool = None) -> dict:
         """The name→password map, decrypting it if it is sealed.
 
         Cached for the life of the `Config`, because every read of a sealed file
@@ -401,6 +469,8 @@ class Config:
         if not isinstance(data, dict):
             return {}
 
+        if allow_prompt is None:
+            allow_prompt = self.interactive
         if vault.is_envelope(data):
             try:
                 data = vault.unseal(data, allow_prompt=allow_prompt)
@@ -524,6 +594,7 @@ class Config:
         self._read_creds(allow_prompt=False)
         return self.credentials_error or ""
 
+    @_mutator
     def reset_credentials(self) -> int:
         """Discard the saved passwords entirely. Returns how many were lost.
 
@@ -562,6 +633,7 @@ class Config:
     # ------------------------------------------------------------------ #
     # Servers
     # ------------------------------------------------------------------ #
+    @_mutator
     def add_or_update_server(self, name: str, ip: str, username: str,
                              password: str, share: str, port: int = 445,
                              encrypt: bool = False, root: str = None) -> str:
@@ -592,6 +664,8 @@ class Config:
         if existing:
             entry.update({key: existing[key] for key in SERVER_SETTINGS
                           if key in existing})
+            if existing.get("identity"):
+                entry["identity"] = existing["identity"]
         # Given explicitly, it wins — that is how a server gets its root at
         # creation, and how the editor changes one.
         if root is not None:
@@ -608,12 +682,14 @@ class Config:
     # Name-less convenience wrapper, kept for callers that configure a server
     # without choosing a name for it — `scripts/local-test.sh` does this to set
     # up a throwaway container. The name falls out of the share.
+    @_mutator
     def set_server(self, ip: str, username: str, password: str, share: str,
                    port: int = 445, name: str = None, encrypt: bool = False) -> str:
         name = name or share or ip or "default"
         return self.add_or_update_server(name, ip, username, password, share,
                                          port, encrypt)
 
+    @_mutator
     def save_server(self, name: str, ip: str, username: str, password: str,
                     share: str, port: int = 445, orig_name: str = None,
                     encrypt: bool = False, root: str = None) -> str:
@@ -645,6 +721,7 @@ class Config:
                                       encrypt, root=root)
         return name
 
+    @_mutator
     def remove_server(self, name: str):
         self.data["servers"] = [s for s in self.data["servers"] if s["name"] != name]
         creds = self._read_creds()
@@ -664,6 +741,7 @@ class Config:
     def get_active_server_name(self):
         return self.data.get("active_server")
 
+    @_mutator
     def set_active_server(self, name: str) -> bool:
         if any(s["name"] == name for s in self.data["servers"]):
             self.data["active_server"] = name
@@ -706,7 +784,25 @@ class Config:
             "share": server.get("share"),
             "port": server.get("port", 445),
             "encrypt": bool(server.get("encrypt", False)),
+            "identity": server.get("identity"),
         }
+
+    @_mutator
+    def set_server_identity(self, name: str, identity) -> None:
+        """Remember (or, with None, forget) which machine a server is.
+
+        Learned on first contact and checked on every one after it, before any
+        password is sent — see `SAMBAClient.connect`. Forgetting it is how a
+        replaced NAS is trusted: the next connection learns the new one.
+        """
+        entry = self._server_entry(name)
+        if not entry:
+            return
+        if identity:
+            entry["identity"] = identity
+        else:
+            entry.pop("identity", None)
+        self.save()
 
     # ------------------------------------------------------------------ #
     # Sync mode
@@ -753,6 +849,7 @@ class Config:
         """This server's sync root, as a clean relative path ("" = whole share)."""
         return normalize_remote(self._server_entry(server).get(SERVER_ROOT, ""))
 
+    @_mutator
     def set_root(self, path: str, server: str = None) -> str:
         """Set the sync root. Everything on the share beside it becomes
         unreachable to every pair, now and later."""
@@ -783,6 +880,7 @@ class Config:
         mode = self.server_setting("sync_mode", server)
         return mode if mode in SYNC_MODES else DEFAULT_SYNC_MODE
 
+    @_mutator
     def set_sync_mode(self, mode: str, server: str = None) -> str:
         if mode not in SYNC_MODES:
             raise ValueError(
@@ -804,6 +902,7 @@ class Config:
         """
         return bool(self.data.get("automation", {}).get("background", True))
 
+    @_mutator
     def set_background(self, enabled: bool) -> bool:
         automation = self.data.setdefault("automation", {})
         automation["background"] = bool(enabled)
@@ -834,6 +933,7 @@ class Config:
             "interval_minutes": int(entry.get("interval_minutes", 0) or 0),
         }
 
+    @_mutator
     def set_automation(self, live_sync=None, scheduled_sync=None,
                        scheduled_time=None, interval_minutes=None,
                        last_scheduled_run=None, background=None,
@@ -847,6 +947,18 @@ class Config:
             values["live_sync"] = bool(live_sync)
         if scheduled_sync is not None:
             values["scheduled_sync"] = bool(scheduled_sync)
+            if scheduled_sync and not self.get_automation(server)["scheduled_sync"] \
+                    and last_scheduled_run is None:
+                # Switching the schedule on starts its clock: a missed *day*
+                # runs at the next chance (see `scheduled_run_is_due`), and a
+                # schedule off for months must not count as months missed —
+                # that would start a mirror sync the moment it is switched on.
+                import datetime
+                yesterday = (datetime.date.today()
+                             - datetime.timedelta(days=1)).isoformat()
+                previous = self.get_automation(server)["last_scheduled_run"]
+                if not previous or previous < yesterday:
+                    values["last_scheduled_run"] = yesterday
         if scheduled_time is not None:
             values["scheduled_time"] = require_time(scheduled_time)
         if interval_minutes is not None:
@@ -857,6 +969,7 @@ class Config:
             self._write_server_settings(server, **values)
         return self.get_automation(server)
 
+    @_mutator
     def record_scheduled_run(self, date_str: str, server: str = None) -> None:
         """Mark today's scheduled sync as done, for one server.
 
@@ -918,12 +1031,14 @@ class Config:
                 "autostart": bool((grant or {}).get("autostart", False)),
                 "background": bool((grant or {}).get("background", False))}
 
+    @_mutator
     def set_portal_grant(self, autostart: bool, background: bool) -> dict:
         self.data["portal"] = {"autostart": bool(autostart),
                                "background": bool(background)}
         self.save()
         return self.get_portal_grant()
 
+    @_mutator
     def clear_portal_grant(self) -> None:
         self.data.pop("portal", None)
         self.save()
@@ -941,6 +1056,7 @@ class Config:
         """
         return bool(self.data.get("notifications", True))
 
+    @_mutator
     def set_notifications(self, enabled: bool) -> bool:
         self.data["notifications"] = bool(enabled)
         self.save()
@@ -965,6 +1081,7 @@ class Config:
         name = server or self.get_active_server_name()
         return self.data["pairs_by_server"].setdefault(name, [])
 
+    @_mutator
     def add_pair(self, local_path: str, server_path: str, name: str = None,
                  server: str = None):
         target = server or self.get_active_server_name()
@@ -993,6 +1110,7 @@ class Config:
         self.save()
         return name
 
+    @_mutator
     def update_pair(self, orig_name: str, local_path: str, server_path: str,
                     name: str, server: str = None):
         # Same reasoning as `add_pair`: refuse a destination that can't stay
@@ -1011,6 +1129,7 @@ class Config:
                 return name
         raise ValueError(f"No pair named '{orig_name}'.")
 
+    @_mutator
     def remove_pair(self, name: str, server: str = None):
         target = server or self.get_active_server_name()
         if not target:
@@ -1024,13 +1143,47 @@ class Config:
         """Pairs belonging to `server`, or to the active server by default."""
         return self._owned_pairs(server)
 
+    def same_storage(self, first: str, second: str) -> bool:
+        """Do two server entries reach the same share on the same NAS?
+
+        One NAS is easily added twice — its LAN address and a VPN name, say —
+        and pairs on the two entries can then overlap without either entry
+        knowing. The NAS's identity (learned on first contact) settles it once
+        both entries have one; until then, the same address does.
+        """
+        if first == second:
+            return True
+        a, b = self._server_entry(first), self._server_entry(second)
+        if not a or not b:
+            return False
+        if (a.get("share") or "").casefold() != (b.get("share") or "").casefold():
+            return False
+        if a.get("identity") and b.get("identity"):
+            return a["identity"] == b["identity"]
+        return (a.get("ip") or "").casefold() == (b.get("ip") or "").casefold()
+
+    def _neighbours(self, server: str):
+        """(server name, pair) for every pair stored on the same storage."""
+        name = server or self.get_active_server_name()
+        for other in self.data.get("servers", []):
+            if self.same_storage(name, other["name"]):
+                for pair in self.data["pairs_by_server"].get(other["name"], []):
+                    yield other["name"], pair
+
     def pair_overlapping(self, server_path: str, server: str = None,
                          ignore: str = None):
-        """The first pair of `server` whose folder overlaps `server_path`."""
-        for pair in self._owned_pairs(server):
-            if pair["name"] != ignore and destinations_overlap(
-                    server_path, pair["server"]):
-                return pair
+        """The first pair, on this server or the same NAS under another entry,
+        whose folder overlaps `server_path` — as ``(label, its resolved path)``.
+        """
+        name = server or self.get_active_server_name()
+        mine = self.resolve_remote(server_path, name)
+        for owner, pair in self._neighbours(name):
+            if owner == name and pair["name"] == ignore:
+                continue
+            theirs = self.resolve_remote(pair["server"], owner)
+            if destinations_overlap(mine, theirs):
+                label = pair["name"] if owner == name else f"{pair['name']}' on '{owner}"
+                return label, theirs
         return None
 
     def _refuse_overlap(self, server_path: str, server: str = None,
@@ -1039,23 +1192,32 @@ class Config:
         looking at the error — not at 19:25 when the mirror run deletes."""
         clash = self.pair_overlapping(server_path, server, ignore)
         if clash:
-            raise ValueError(overlap_message(server_path, clash["name"],
-                                             clash["server"]))
+            label, theirs = clash
+            name = server or self.get_active_server_name()
+            raise ValueError(overlap_message(
+                self.resolve_remote(server_path, name), label, theirs))
 
     def overlapping_pairs(self, server: str = None) -> dict:
-        """``{pair_name: [names of pairs whose folder overlaps it]}``.
+        """``{pair_name: [what its folder overlaps]}`` for one server's pairs.
 
         Configs written before 0.20.0 can already contain overlaps, which no
         longer get in at the door. Sync skips these pairs, and both front-ends
-        flag them, so the existing ones stop deleting and get noticed.
+        flag them, so the existing ones stop deleting and get noticed. Pairs of
+        another entry for the same NAS count too (see `same_storage`).
         """
-        pairs = self._owned_pairs(server)
+        name = server or self.get_active_server_name()
+        neighbours = [(owner, pair, self.resolve_remote(pair["server"], owner))
+                      for owner, pair in self._neighbours(name)]
         clashes = {}
-        for i, first in enumerate(pairs):
-            for second in pairs[i + 1:]:
-                if destinations_overlap(first["server"], second["server"]):
-                    clashes.setdefault(first["name"], []).append(second["name"])
-                    clashes.setdefault(second["name"], []).append(first["name"])
+        for pair in self._owned_pairs(name):
+            mine = self.resolve_remote(pair["server"], name)
+            for owner, other, theirs in neighbours:
+                if owner == name and other["name"] == pair["name"]:
+                    continue
+                if destinations_overlap(mine, theirs):
+                    label = (other["name"] if owner == name
+                             else f"{other['name']} (on {owner})")
+                    clashes.setdefault(pair["name"], []).append(label)
         return clashes
 
     def get_pair(self, name: str, server: str = None):

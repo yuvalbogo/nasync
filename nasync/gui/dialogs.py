@@ -1038,9 +1038,15 @@ class RemoteBrowserDialog(Adw.Dialog):
     def _relative_to_root(self) -> str:
         """The chosen folder as the pair stores it — relative to the root."""
         path, root = self._path.strip("/"), self._root.strip("/")
-        if root and path.startswith(root):
-            path = path[len(root):].strip("/")
-        return path
+        # By whole components and ignoring case, as the share compares them:
+        # a root typed "Yuval" over a listing that says "yuval" used to strip
+        # nothing, so the pair was stored as "yuval/x" *under* the root —
+        # a different folder from the one that had been picked.
+        parts, root_parts = path.split("/"), root.split("/") if root else []
+        if root_parts and [p.casefold() for p in parts[:len(root_parts)]] \
+                == [p.casefold() for p in root_parts]:
+            parts = parts[len(root_parts):]
+        return "/".join(p for p in parts if p)
 
     def _on_select_clicked(self, _button) -> None:
         """Choose the folder currently being shown.

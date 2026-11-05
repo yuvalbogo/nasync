@@ -93,10 +93,18 @@ def same_subnet(ip: str, route_text: str = None):
 
 
 def is_private(ip: str) -> bool:
+    """Not on the public internet — home ranges, and VPN ranges too.
+
+    Python counts 100.64.0.0/10 (carrier-grade NAT, which Tailscale uses) as
+    neither private nor global. A NAS reached at a Tailscale address was
+    therefore always "away", and live sync silently never ran.
+    """
     try:
-        return ipaddress.IPv4Address(ip).is_private
+        address = ipaddress.IPv4Address(ip)
     except ipaddress.AddressValueError:
         return False
+    return address.is_private or not (address.is_global or address.is_multicast
+                                      or address.is_unspecified)
 
 
 def reachable(ip: str, port: int = 445, timeout: float = PROBE_TIMEOUT) -> bool:

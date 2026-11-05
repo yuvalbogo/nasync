@@ -335,35 +335,48 @@ def sync(pair, dry_run, mode, no_delete, allow_mass_delete):
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
 
-    # A held-back mirror run is a question, so ask it — then run just those
-    # folders again with the answer.
+    # Held-back changes are a question, so ask it — then run just those
+    # folders again with the answer, which covers exactly what was shown.
     held = [r for r in result.get("refused", [])
             if r.get("confirmable") and not r.get("dry_run")]
+    answered = False
     if held and not dry_run:
         click.echo("")
         for r in held:
-            click.echo(f"🛑 '{r['pair']}' would delete {r['deletes']:,} of "
-                       f"{r['total']:,} file(s) on the server.")
+            what = []
+            if r.get("deletes"):
+                what.append(f"delete {r['deletes']:,}")
+            if r.get("overwrites"):
+                what.append(f"overwrite {r['overwrites']:,}")
+            click.echo(f"🛑 '{r['pair']}' would {' and '.join(what) or 'change'} "
+                       f"of {r['total']:,} file(s) on the server. New files were "
+                       f"backed up; only this part waited.")
         if not sys.stdin.isatty():
             click.echo("   Not asking without a terminal. Check with "
                        "'nasync sync --dry-run', then run again with "
                        "--allow-mass-delete.")
-        elif click.confirm("   Delete them? Check with --dry-run first if "
-                           "unsure", default=False):
+        elif click.confirm("   Go ahead? Check with --dry-run first if unsure",
+                           default=False):
+            answered = True
             for r in held:
                 try:
                     again = Syncer(source="cli").sync_pair(
-                        r["pair"], mirror=mirror, allow_mass_delete=True)
+                        r["pair"], mirror=mirror,
+                        allow_mass_delete={r["pair"]: r.get("fingerprint")})
                 except Exception as e:
                     click.echo(f"❌ Error: {e}", err=True)
                     raise SystemExit(1)
-                result["ok"] += again["ok"]
-                result["failed"] += again["failed"] - 1
                 result["errors"] += again["errors"]
-    if result["failed"] and not result["ok"]:
-        _finished(result, "Sync")
-        raise SystemExit(1)
+                result["failed"] += again["failed"]
+                if again.get("refused"):
+                    click.echo(f"   '{r['pair']}' changed again since — run "
+                               f"sync once more to see the new list.")
     _finished(result, "Sync")
+    # Any file that didn't make it is a non-zero exit, for scripts and cron:
+    # a run that skipped one unreadable file used to exit 0.
+    if (result["failed"] or result["errors"]
+            or (held and not answered and not dry_run)):
+        raise SystemExit(1)
 
 
 @main.command()
@@ -389,10 +402,39 @@ def restore(pair, dry_run, yes):
     except Exception as e:
         click.echo(f"❌ Error: {e}", err=True)
         raise SystemExit(1)
-    if result["failed"] and not result["ok"]:
-        _finished(result, "Restore")
-        raise SystemExit(1)
     _finished(result, "Restore")
+    if result["failed"] or result["errors"]:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--server", "server", default=None, metavar="NAME",
+              help="Which server (default: the active one)")
+def trust(server):
+    """Trust the NAS now answering at a server's address
+
+    NASync remembers which machine a server is the first time it connects,
+    and never sends your password to a different one at the same address —
+    on another network that happens to use your home's addresses, that
+    machine is a stranger. After replacing or reinstalling your NAS, run
+    this to trust the new one.
+    """
+    config = Config()
+    server = _require_server(config, server)
+    details = config.get_server_config(server)
+    client = SAMBAClient(details["ip"], details["username"], "", details["share"],
+                         port=details.get("port", 445))
+    seen = client.server_identity()
+    if not seen:
+        click.echo(f"❌ Couldn't reach {details['ip']} to ask who it is.", err=True)
+        raise SystemExit(1)
+    before = details.get("identity")
+    config.set_server_identity(server, seen)
+    if before and before != seen:
+        click.echo(f"✅ '{server}' now trusts the NAS at {details['ip']} "
+                   f"(it replaces the one NASync knew before).")
+    else:
+        click.echo(f"✅ '{server}' trusts the NAS at {details['ip']}.")
 
 
 @main.command()

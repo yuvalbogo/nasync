@@ -195,7 +195,9 @@ def test_live_sync_fires_on_a_real_file_change(monkeypatch):
         finally:
             Automator._stop_watching(observer, handlers)
 
-        assert syncs == [None], syncs      # fired, and coalesced into one run
+        # Fired, coalesced into one run — of the pair whose folder changed,
+        # not of every pair (since 0.21.0).
+        assert syncs == ["pair"], syncs
         print("✅ test_live_sync_fires_on_a_real_file_change passed")
 
 
@@ -1114,3 +1116,109 @@ def test_a_cancelled_background_run_is_not_retried_behind_the_users_back(
         automator = Automator(reporter=lambda _m: None, config=config)
         automator.on_files_changed()
         assert not automator.changes_pending()
+
+
+# --------------------------------------------------------------------------- #
+# 0.21.0 — the automation layer never goes quiet about what it couldn't do
+# --------------------------------------------------------------------------- #
+def test_a_whole_missed_day_runs_at_the_next_chance():
+    """A 23:00 schedule on a laptop that sleeps at 22:30 never backed up."""
+    morning = datetime.datetime(2026, 8, 6, 8, 0)
+    assert scheduled_run_is_due("23:00", "2026-08-04", now=morning)
+    assert not scheduled_run_is_due("23:00", "2026-08-05", now=morning)
+    assert not scheduled_run_is_due("23:00", "2026-08-06", now=morning)
+
+
+def test_one_failing_pair_keeps_its_changes_owed(monkeypatch):
+    import nasync.core.automation as automation_module
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        os.makedirs(os.path.join(tmp, "b"))
+        config.add_pair(os.path.join(tmp, "b"), "/other", "second")
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: True)
+
+        class _HalfSyncer:
+            def __init__(self, *a, **k):
+                pass
+
+            def sync_pair(self, pair_name=None):
+                ok = pair_name == "pair"
+                return {"ok": int(ok), "failed": int(not ok), "transferred": 0,
+                        "pairs": {pair_name: "ok" if ok else "failed"}}
+
+        monkeypatch.setattr(automation_module, "Syncer", _HalfSyncer)
+        automator = Automator(reporter=lambda _m: None, config=config)
+        automator.note_changes("pair")
+        automator.note_changes("second")
+        automator.catch_up()
+        assert automator._owed_pairs() == ["second"]
+
+
+def test_a_folder_that_cannot_be_watched_falls_back_to_a_timer(monkeypatch,
+                                                               recording_notifier):
+    import nasync.core.automation as automation_module
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+
+        class _FullObserver:
+            def schedule(self, *a, **k):
+                raise OSError(28, "inotify watch limit reached")
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def join(self):
+                pass
+
+        monkeypatch.setattr(automation_module, "Observer", _FullObserver)
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        _observer, handlers = automator._start_watching()
+        assert handlers == [] and automator._fallback == {"pair"}
+        assert "watch limit" in recording_notifier.sent[-1][1]
+        automator._fallback_at = time.monotonic() - 1
+        assert automator.fallback_due() and automator._owed_pairs() == ["pair"]
+
+
+def test_changes_waiting_too_long_are_announced(monkeypatch, recording_notifier):
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        monkeypatch.setattr(lan, "on_lan", lambda ip, port=445: False)
+        monkeypatch.setattr(lan, "describe", lambda ip, port=445: "away")
+        automator = Automator(reporter=lambda _m: None, config=config,
+                              notifier=recording_notifier)
+        automator.on_files_changed("pair")
+        automator._owed_since -= automator.OWED_ALERT_SECONDS + 1
+        automator.check_owed()
+        automator.check_owed()                  # said once, not every tick
+        waiting = [s for s in recording_notifier.sent
+                   if s[0] == "Changes are waiting to be backed up"]
+        assert len(waiting) == 1, recording_notifier.sent
+
+
+def test_a_vpn_address_can_count_as_home():
+    """Tailscale's 100.64.0.0/10 was 'public', so live sync never ran."""
+    assert lan.is_private("100.101.102.103")
+    assert lan.is_private("192.168.1.5")
+    assert not lan.is_private("8.8.8.8")
+
+
+def test_watchers_follow_pairs_added_while_running(monkeypatch):
+    from nasync.core.automation import _WatchState
+    with tempfile.TemporaryDirectory() as tmp:
+        config = _configured(tmp)
+        automator = Automator(reporter=lambda _m: None, config=config)
+        runner = AutomationRunner([automator], config=config)
+        state = runner._states[0]
+        runner._sync_watchers(state, True)
+        assert {n for n, _ in state.plan} == {"pair"}
+        os.makedirs(os.path.join(tmp, "added"))
+        config.add_pair(os.path.join(tmp, "added"), "/added", "added")
+        runner._sync_watchers(state, True)
+        assert {n for n, _ in state.plan} == {"pair", "added"}
+        assert "added" in automator._owed_pairs(), "may hold unsynced changes"
+        runner._stop_all_watchers()
+        assert isinstance(state, _WatchState)
