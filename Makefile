@@ -1,4 +1,4 @@
-.PHONY: help install install-dev install-user test lab clean format lint
+.PHONY: help install install-dev install-user test lab e2e check-all clean format lint
 
 help:
 	@echo "NASync - Development Commands"
@@ -8,6 +8,8 @@ help:
 	@echo "  make install-user  Install for everyday use, apart from this checkout (REF=main)"
 	@echo "  make test          Run tests"
 	@echo "  make lab           Run the data-safety lab (real Samba, needs podman)"
+	@echo "  make e2e           Run the end-to-end suite: CLI, automation, window"
+	@echo "  make check-all     Lint, unit tests, the lab and the end-to-end suite"
 	@echo "  make clean         Clean build artifacts"
 	@echo "  make format        Format code with black"
 	@echo "  make lint          Check code with flake8"
@@ -32,6 +34,15 @@ test:
 # copied, renamed or deleted. See DATA_SAFETY.md.
 lab:
 	python -m pytest tests/lab --lab -v
+
+# The whole app as a person uses it — `nasync` commands, the background
+# automation, the window — against throwaway Samba containers, in a test
+# profile. On demand: it needs podman, and the window tests a desktop session.
+e2e:
+	python -m pytest tests/e2e --e2e -v
+
+# Everything, before anything is merged to main.
+check-all: lint test lab e2e
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +

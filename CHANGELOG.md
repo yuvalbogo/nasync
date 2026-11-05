@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.2] - 2026-11-05
+
+### Added
+- **An end-to-end test suite** (`make e2e`) that uses the app the way a person
+  does, in a throwaway test profile against throwaway Samba servers: `nasync`
+  commands run as separate processes (a full back-up/change/restore round trip,
+  the update→mirror guard, the inspection commands, one-sync-at-a-time and
+  cancel across processes, exit codes), the background automation left running
+  (live sync, a missed scheduled run, a held run announced and then asked
+  about), two NASes with the same host name, an encrypted share, and the real
+  window driven through its main loop. Every result is checked on the
+  server's own disk. `make check-all` runs lint, unit tests, the lab and this.
+
+### Fixed
+- **`nasync add --server typo` said "Added"** and filed a pair under a server
+  that doesn't exist, which nothing would ever sync. Refused, with the names
+  of the servers that do exist. (Found by the new suite.)
+- Unit tests left the SMB layer replaced by a fake, so a real sync later in
+  the same test run talked to the fake.
+
 ## [0.22.1] - 2026-11-05
 
 The third data-safety audit (of 0.21.1): 13 findings, 12 proven against a

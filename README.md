@@ -1076,6 +1076,17 @@ and checks the server's own disk; see [DATA_SAFETY.md](DATA_SAFETY.md):
 make lab                    # needs podman or docker
 ```
 
+The end-to-end suite uses the app the way a person does — `nasync` commands
+run as separate processes, the background automation left running, the real
+window driven through its main loop — in a throwaway test profile against
+throwaway Samba servers (including two NASes with the same host name and one
+that requires encryption), and checks every result on the server's own disk:
+
+```bash
+make e2e                    # needs podman; window tests need a desktop session
+make check-all              # lint, unit tests, the lab and the e2e suite
+```
+
 ## How the code is laid out
 
 ```

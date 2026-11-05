@@ -1152,6 +1152,11 @@ class Config:
         target = server or self.get_active_server_name()
         if not target:
             raise ValueError("No server selected. Add a server first.")
+        if not self._server_entry(target):
+            # A pair filed under a name no server has is one nothing will ever
+            # sync — and `nasync add --server typo` used to say "Added".
+            known = ", ".join(s["name"] for s in self.list_servers()) or "none"
+            raise ValueError(f"No server named '{target}'. Configured servers: {known}.")
 
         # Normalised here rather than at sync time, so a destination that
         # cannot stay inside the sync root is refused while someone is looking
