@@ -19,7 +19,7 @@ Tests live in ``tests/`` at the repository root, one file per module.
 # The single source of truth for the project version. `pyproject.toml` reads
 # this attribute via `[tool.setuptools.dynamic]`, and the CLI's --version flag
 # imports it directly, so this is the only line to touch when releasing.
-__version__ = "0.22.1"
+__version__ = "0.22.2"
 
 # The application's identity, shared by everything that has to agree on it: the
 # .desktop file name, the icon name, GLib.set_prgname(), and the desktop-entry

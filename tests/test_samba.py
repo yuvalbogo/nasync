@@ -149,6 +149,16 @@ class _CM:
         return False
 
 
+@pytest.fixture(autouse=True)
+def _real_smbclient_afterwards():
+    """Put the real SMB module back after each test. `_client` swaps in a
+    fake, and left in place it made every real sync later in the same run
+    (the lab, the e2e suite) talk to the fake."""
+    real = samba_module.smbclient
+    yield
+    samba_module.smbclient = real
+
+
 def _client(fake, **kwargs):
     """Build a client wired to a fake SMB layer — and no network at all.
 

@@ -950,3 +950,16 @@ def test_renaming_a_server_carries_its_identity_and_records(tmp_path, monkeypatc
     moved = state.SyncState(config.config_dir, "home-nas", "share", "docs")
     assert moved.initialised
     moved.close()
+
+
+def test_a_pair_for_a_server_that_does_not_exist_is_refused(tmp_path, monkeypatch):
+    """`nasync add --server typo` said "Added", filing a pair nothing syncs."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from nasync.system import vault
+    monkeypatch.setattr(vault, "backend", lambda: "")
+    from nasync.core.config import Config
+    config = Config()
+    config.add_or_update_server("nas", "10.0.0.5", "u", "p", "share", 445)
+    with pytest.raises(ValueError, match="No server named 'typo'"):
+        config.add_pair(str(tmp_path), "docs", "docs", server="typo")
+    assert "typo" not in config.data["pairs_by_server"]

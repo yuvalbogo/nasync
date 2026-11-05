@@ -116,3 +116,7 @@ def pytest_addoption(parser):
     parser.addoption("--lab", action="store_true", default=False,
                      help="run the data-safety lab against a throwaway Samba "
                           "container (needs podman or docker)")
+    parser.addoption("--e2e", action="store_true", default=False,
+                     help="run the end-to-end suite (the CLI, the background "
+                          "automation and the window) against throwaway Samba "
+                          "containers")
