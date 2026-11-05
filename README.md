@@ -51,6 +51,23 @@ cd nasync
 pip install -e .
 ```
 
+### For everyday use, from a checkout
+
+A checkout is for working on NASync; the app and the background service
+shouldn't run whatever branch it happens to have checked out. This installs a
+copy apart from it, from `main` by default:
+
+```bash
+make install-user            # or: make install-user REF=v0.21.2
+```
+
+It builds a virtualenv under `~/.local/share/nasync` from a clean export of
+that ref, then points the app launcher, the background service and
+`~/.local/bin/nasync` at it. The checkout can switch branches, move, or lose
+its `.venv` without the app or tonight's sync noticing. The previous install is
+kept for a rollback. After a Fedora upgrade that changes the Python version,
+run it again.
+
 ### Via pip (when published)
 
 ```bash
@@ -631,6 +648,12 @@ desktop app directly. If GTK4 and libadwaita 1.5+ aren't available the command
 refuses rather than installing an entry that opens nothing — a launcher in your
 apps list that does nothing is worse than no launcher at all.
 
+If the app can't start later — the copy it points at was moved or deleted, or
+a Python upgrade broke its virtualenv — clicking the icon shows a notification
+saying why and how to fix it, instead of nothing. The output of the last launch
+is in `~/.local/state/nasync/gui.log`. `nasync status` reports the same, and
+opening the app any other way repairs the launcher.
+
 This installs a standard freedesktop `.desktop` entry and an icon under
 `~/.local/share` (nothing system-wide, no root needed). Both are named after
 the application ID, `io.github.YuvalBogo.NASync`, which is what lets GNOME
@@ -1044,6 +1067,13 @@ Pure-logic unit tests (no server required):
 ```bash
 python -m pytest            # the whole suite
 python -m pytest tests/test_samba.py -v
+```
+
+The data-safety lab runs the real engine against a throwaway Samba container
+and checks the server's own disk; see [DATA_SAFETY.md](DATA_SAFETY.md):
+
+```bash
+make lab                    # needs podman or docker
 ```
 
 ## How the code is laid out

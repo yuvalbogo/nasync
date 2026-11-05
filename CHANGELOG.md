@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.2] - 2026-11-05
+
+### Fixed
+- **Clicking the app icon did nothing when NASync couldn't start** — a moved
+  checkout, or a Python upgrade under its virtualenv. The launcher now runs a
+  small wrapper that opens the app, or shows a notification with the reason
+  and the fix; the last launch's output is in `~/.local/state/nasync/gui.log`.
+
+### Added
+- **`make install-user`** installs NASync for everyday use apart from the
+  checkout (from `main` by default) and points the launcher, the background
+  service and `~/.local/bin/nasync` at it, so switching branches never changes
+  what the app and the nightly sync run.
+
 ## [0.21.1] - 2026-11-05
 
 The second data-safety audit, run against 0.21.0's new mechanisms. Every
