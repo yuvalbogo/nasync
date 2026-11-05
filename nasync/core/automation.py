@@ -168,8 +168,8 @@ class Automator:
         self._overrides = {}        # CLI flags that beat the saved settings
         self._lan_state = False
         self._lan_checked_at = None
-        self._reported_lan = None   # None = nothing said yet, so the first
-                                    # verdict is always worth logging
+        # None = nothing said yet, so the first verdict is always worth logging.
+        self._reported_lan = None
         # This is the one place a sync happens with nobody watching, so the
         # desktop notification *is* the user interface for it.
         # Nobody can answer a keyring prompt here; see `Config.interactive`.

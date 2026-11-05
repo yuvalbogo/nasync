@@ -538,9 +538,9 @@ def test_record_scheduled_run_does_not_clobber_concurrent_edits():
 # re-picking a folder in mirror mode is the operation with the worst failure
 # mode NASync has.
 # --------------------------------------------------------------------------- #
-import pytest
+import pytest  # noqa: E402
 
-import nasync.core.config as config_module
+import nasync.core.config as config_module  # noqa: E402
 
 
 @pytest.fixture
@@ -707,7 +707,6 @@ if __name__ == "__main__":
     test_sync_mode()
     test_automation_defaults_to_off()
     test_background_gates_the_service_without_clearing_triggers()
-    test_hints_are_remembered()
     test_scheduled_time_is_validated_and_normalized()
     test_legacy_automation_keys_migrate_to_live_sync()
     test_record_scheduled_run_does_not_clobber_concurrent_edits()

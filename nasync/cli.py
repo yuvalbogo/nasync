@@ -862,7 +862,8 @@ def _describe_automation(config) -> list:
         lines.append(f"  {name}  ({config.get_sync_mode(name)} mode)")
         lines.append(
             f"    Live sync:      {'on' if a['live_sync'] else 'off'}"
-            f"{'  (syncs seconds after a file changes, on that network)' if a['live_sync'] else ''}")
+            + ("  (syncs seconds after a file changes, on that network)"
+               if a["live_sync"] else ""))
         lines.append(
             f"    Scheduled sync: "
             f"{'on at ' + a['scheduled_time'] if a['scheduled_sync'] else 'off'}")
@@ -1340,7 +1341,8 @@ def servers_cmd():
     for s in servers:
         mark = "* " if s["name"] == active else "  "
         lock = " 🔒" if s.get("encrypt") else ""
-        click.echo(f"{mark}{s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']}){lock}")
+        click.echo(f"{mark}{s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, "
+                   f"user {s['username']}){lock}")
 
 
 @main.command()
@@ -1361,7 +1363,6 @@ def status():
     config = Config()
     servers = config.list_servers()
     active = config.get_active_server_name()
-    pairs = config.get_pairs()
 
     if config.imported_from_host:
         # Copying someone's saved passwords into a new location shouldn't
@@ -1386,13 +1387,14 @@ def status():
     for s in servers:
         mark = "●" if s["name"] == active else "○"
         wire = "encrypted" if s.get("encrypt") else "not encrypted"
-        click.echo(f"    {mark} {s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, user {s['username']})")
+        click.echo(f"    {mark} {s['name']}  ({s['ip']}:{s.get('port', 445)}/{s['share']}, "
+                   f"user {s['username']})")
         click.echo(f"        connection: {wire}")
         # Stated per server rather than once for the app: since 0.18.0 these
         # can differ, and "sync mode: mirror" over a list of servers would be
         # a claim about all of them.
         server_root = config.get_root(s["name"])
-        click.echo(f"        sync root:  "
+        click.echo("        sync root:  "
                    + (f"{s['share']}:/{server_root}  (nothing beside it is in range)"
                       if server_root else
                       "none — the whole share is in range of a sync"))

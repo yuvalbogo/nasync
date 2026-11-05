@@ -625,8 +625,8 @@ def test_syncs_never_overlap_across_servers(monkeypatch):
         _recording_syncer(monkeypatch)
 
         lock = threading.Lock()
-        home = Automator(reporter=lambda _m: None, config=config,
-                         server="home", sync_lock=lock)
+        Automator(reporter=lambda _m: None, config=config,
+                  server="home", sync_lock=lock)
         work = Automator(reporter=lambda _m: None, config=config,
                          server="work", sync_lock=lock)
 

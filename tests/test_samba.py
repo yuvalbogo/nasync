@@ -396,7 +396,6 @@ def test_the_cost_of_verifying_can_be_stated_before_paying_it():
     assert client.duplicate_scan_cost(groups) == 200      # both files, in full
 
 
-
 def test_status_codes_wrapped_in_smboserror_still_get_a_friendly_message():
     """Regression: `smbclient` reports protocol failures through SMBOSError
     rather than the typed exceptions, so matching on the class alone let a raw
