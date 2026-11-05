@@ -18,8 +18,8 @@ try:
     gi.require_version("Adw", "1")
     from gi.repository import Adw, Gtk
 
-    from nasync.gui.dialogs import AutomaticPopover, ModePopover
-    from nasync.gui.window import NasyncWindow, _format_bytes
+    from nasync.gui.window import NasyncWindow
+    from nasync.format import format_bytes as _format_bytes
 
     HAVE_GTK = True
 except (ImportError, ValueError):        # no PyGObject, or no typelibs
@@ -117,9 +117,15 @@ def test_launcher_prefers_the_running_executable(monkeypatch, tmp_path):
 # --------------------------------------------------------------------- #
 @pytest.fixture
 def window(monkeypatch):
-    """A real window backed by a throwaway config."""
+    """A real window backed by a throwaway config — and a throwaway data dir.
+
+    The data dir matters since 0.20.0: a window checks the app launcher at
+    start and repairs a broken one, and a test must never be the thing that
+    rewrites the real ~/.local/share/applications entry.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setenv("XDG_CONFIG_HOME", tmp)
+        monkeypatch.setenv("XDG_DATA_HOME", os.path.join(tmp, "data"))
         Adw.init()
         app = Adw.Application(application_id="io.github.YuvalBogo.NASync.Test")
         yield NasyncWindow(app)
@@ -151,7 +157,7 @@ def test_summary_reports_unsupported_names(window):
                               "skipped": 0, "deleted": 0, "unsupported": 4})
 
     assert window._progress_title.get_label() == "Complete"
-    assert "4 skipped (name illegal on SMB)" in window._progress_detail.get_label()
+    assert "4 skipped (see details)" in window._progress_detail.get_label()
     assert not window._details_button.get_visible()
 
 
@@ -166,7 +172,9 @@ def test_collect_report_keeps_failures_and_drops_the_rest(window):
     ):
         window._collect_report(line)
 
+    # A skipped file is a file the backup doesn't have, so it is listed too.
     assert window._errors == ["a.txt: permission denied",
+                              "skipped (name illegal on SMB): c:d.txt",
                               "Failed on photos: connection reset"]
 
 
@@ -184,135 +192,6 @@ def test_byte_progress_advances_within_a_file(window):
     window._update_byte_progress(512, 1024, "big.iso", "Uploading")
     # Half of the first of four files.
     assert window._progress_bar.get_fraction() == pytest.approx(0.125)
-
-
-@needs_gtk
-def test_settings_dialog_applies_the_mode_instantly(window):
-    """No Save button, so a toggle has to reach the config on its own."""
-    from nasync.gui.dialogs import SettingsDialog
-
-    seen = []
-    dialog = SettingsDialog(window.config, on_changed=seen.append)
-    assert dialog._buttons["mirror"].get_active()      # the default
-
-    dialog._buttons["update"].set_active(True)
-    assert window.config.get_sync_mode() == "update"
-    assert seen == ["update"]
-
-    dialog._buttons["mirror"].set_active(True)
-    assert window.config.get_sync_mode() == "mirror"
-    assert seen == ["update", "mirror"]
-
-
-@needs_gtk
-def test_automation_switches_save_and_match_the_service(window, monkeypatch):
-    """Each switch has to persist *and* reconcile the background service —
-    saving alone would leave a setting that never actually runs."""
-    import nasync.gui.dialogs as dialogs_module
-    from nasync.system import service
-    from nasync.gui.dialogs import SettingsDialog
-
-    applied = []
-    monkeypatch.setattr(service, "apply", lambda config: applied.append(
-        config.get_automation()) or service.status())
-    monkeypatch.setattr(service, "available", lambda: False)
-    # The dialog reconciles the service on a worker thread; run it inline so
-    # this test observes the result rather than racing it.
-    monkeypatch.setattr(
-        dialogs_module, "run_async",
-        lambda work, on_done=None, on_error=None: on_done(work()))
-
-    dialog = SettingsDialog(window.config, on_changed=lambda _w: None)
-    assert not dialog._live_row.get_active()          # off by default
-    assert not dialog._scheduled_row.get_active()
-    assert not dialog._time_row.get_sensitive()       # nothing to schedule yet
-
-    dialog._live_row.set_active(True)
-    assert window.config.get_automation()["live_sync"] is True
-
-    dialog._scheduled_row.set_active(True)
-    assert window.config.get_automation()["scheduled_sync"] is True
-    assert dialog._time_row.get_sensitive()
-
-    dialog._hour_spin.set_value(7)
-    dialog._minute_spin.set_value(30)
-    assert window.config.get_automation()["scheduled_time"] == "07:30"
-
-    # Every change reached the service, not just the config file.
-    assert len(applied) >= 3, applied
-
-
-@needs_gtk
-def test_background_switch_turns_the_service_off_without_losing_the_triggers(
-        window, monkeypatch):
-    """Turning background off must keep live/scheduled configured — it pauses
-    automation, it doesn't reset it."""
-    import nasync.gui.dialogs as dialogs_module
-    from nasync.system import service
-    from nasync.gui.dialogs import SettingsDialog
-
-    monkeypatch.setattr(service, "backend", lambda: service.SYSTEMD)
-    monkeypatch.setattr(service, "is_active", lambda: True)
-    monkeypatch.setattr(
-        dialogs_module, "run_async",
-        lambda work, on_done=None, on_error=None: on_done(work()))
-
-    installed = []
-    monkeypatch.setattr(service, "_install_systemd", lambda: installed.append("on"))
-    monkeypatch.setattr(service, "restart", lambda: None)
-    monkeypatch.setattr(service, "uninstall",
-                        lambda config=None: installed.append("off") or True)
-
-    window.config.set_automation(live_sync=True)
-    dialog = SettingsDialog(window.config)
-    assert dialog._service_row.get_active()          # on by default
-
-    dialog._service_row.set_active(False)
-    automation = window.config.get_automation()
-    assert automation["background"] is False
-    assert automation["live_sync"] is True           # trigger survives
-    assert window.config.background_service_wanted() is False
-    assert installed[-1] == "off"
-    assert "nothing runs them" in dialog._service_row.get_subtitle()
-
-    dialog._service_row.set_active(True)
-    assert window.config.get_automation()["background"] is True
-    assert installed[-1] == "on"
-
-
-@needs_gtk
-def test_the_state_buttons_open_the_settings_they_report(window):
-    """Mode and automatic syncing are shown where they can also be changed,
-    rather than described in a caption and buried in the menu."""
-    assert window._mode_button.get_popover() is window._mode_popover
-    assert window._auto_button.get_popover() is window._auto_popover
-
-    # Opening one reloads it from the config, so a change made elsewhere (the
-    # Settings dialog, or a `nasync` command) can't leave it showing stale
-    # state.
-    window.config.set_sync_mode("update")
-    window._mode_popover.reload()
-    assert window._mode_popover._checks["update"].get_active()
-
-    window.config.set_sync_mode("mirror")
-    window._mode_popover.reload()
-    assert window._mode_popover._checks["mirror"].get_active()
-
-
-@needs_gtk
-def test_the_mode_popover_writes_the_mode_and_tells_the_window(window):
-    """Instant-apply: picking a mode is the change, not a step towards it."""
-    changed = []
-    popover = ModePopover(window.config, on_changed=changed.append)
-
-    popover._checks["update"].set_active(True)
-    assert window.config.get_sync_mode() == "update"
-    assert changed == ["update"]
-
-    # Reloading is not the user choosing, so it must not report a change.
-    window.config.set_sync_mode("mirror")
-    popover.reload()
-    assert changed == ["update"]
 
 
 @needs_gtk
@@ -335,18 +214,6 @@ def test_cancel_sits_at_the_end_of_the_action_row(window):
     assert order.index(window._progress_bar) < order.index(
         window._progress_detail.get_parent())
     assert window._progress_title.get_halign() == Gtk.Align.CENTER
-
-
-@needs_gtk
-def test_settings_dialog_reports_a_missing_background_service(window, monkeypatch):
-    from nasync.system import service
-    from nasync.gui.dialogs import SettingsDialog
-
-    monkeypatch.setattr(service, "backend", lambda: "")
-    window.config.set_automation(live_sync=True)
-
-    dialog = SettingsDialog(window.config)
-    assert "only runs while NASync is open" in dialog._service_row.get_subtitle()
 
 
 @needs_gtk
@@ -444,7 +311,20 @@ def test_remote_browser_selects_the_folder_it_is_showing(monkeypatch):
     browser = RemoteBrowserDialog(_SERVER, start_path="photos/2024",
                                   on_chosen=chosen.append)
     browser._on_select_clicked(None)
-    assert chosen[-1] == "/photos/2024"
+    assert chosen[-1] == "photos/2024"      # stored relative since 0.19.0
+
+
+@needs_gtk
+def test_the_browser_strips_the_root_by_folder_and_ignoring_case(monkeypatch):
+    from nasync.gui import dialogs
+    from nasync.gui.dialogs import RemoteBrowserDialog
+
+    monkeypatch.setattr(dialogs, "run_async", lambda work, on_done=None, **k: None)
+    browser = RemoteBrowserDialog(_SERVER, confine_to="Yuval")
+    browser._path = "yuval/photos"
+    assert browser._relative_to_root() == "photos"
+    browser._path = "yuval2/photos"           # beside the root, not inside it
+    assert browser._relative_to_root() == "yuval2/photos"
 
 
 @needs_gtk
@@ -603,10 +483,10 @@ def test_storage_dialog_says_duplicates_are_by_size_and_never_deleted(monkeypatc
          "hash": None},
     ])
 
-    subtitle = storage._summary.get_subtitle()
+    subtitle = storage._dup_summary.get_subtitle()
     assert "Matched by size" in subtitle
     assert "never removes files" in subtitle
-    assert _row_titles(storage._list)[0] == "8.8 KB wasted"
+    assert _row_titles(storage._dup_list)[0] == "8.8 KB wasted"
 
 
 @needs_gtk
@@ -619,7 +499,7 @@ def test_storage_dialog_reports_no_duplicates_without_implying_a_clean_bill(
     storage = StorageDialog(_SERVER)
     storage._on_duplicates("", [])
     # The size floor has to be stated, or "no duplicates" overclaims.
-    assert "were not considered" in storage._summary.get_subtitle()
+    assert "were not considered" in storage._dup_summary.get_subtitle()
 
 
 @needs_gtk
@@ -703,75 +583,6 @@ def test_server_info_survives_a_server_that_refuses_the_share_list(monkeypatch):
 
 
 @needs_gtk
-def test_window_shows_the_active_mode(window):
-    """Mirror deletes files, so the button says which mode is armed rather than
-    hiding it behind the menu."""
-    window.config.set_sync_mode("mirror")
-    window.refresh_summary()
-    assert window._mode_content.get_label() == "Mirror"
-    assert "deleted on the server" in window._mode_button.get_tooltip_text()
-
-    # The popover writes the config, then notifies the window — same order here.
-    window.config.set_sync_mode("update")
-    window._on_settings_changed("update")
-    assert window._mode_content.get_label() == "Update"
-    assert "Nothing is deleted" in window._mode_button.get_tooltip_text()
-
-
-@needs_gtk
-def test_window_shows_whether_automatic_syncing_is_on(window):
-    """Someone whose machine syncs by itself should be able to see that."""
-    window.refresh_summary()
-    assert window._auto_content.get_label() == "Automatic: off"
-
-    window.config.set_automation(live_sync=True, scheduled_sync=True,
-                                 scheduled_time="7:5")
-    window.refresh_summary()
-    label = window._auto_content.get_label()
-    assert "Live" in label
-    assert "daily 07:05" in label
-
-
-@needs_gtk
-def test_configured_but_not_running_automation_reads_as_paused(window):
-    """Triggers on with the background switch off is neither on nor off, and
-    it's the state most likely to be mistaken for 'it's syncing'."""
-    window.config.set_automation(live_sync=True, background=False)
-    window.refresh_summary()
-
-    assert window._auto_content.get_label() == "Paused"
-    assert "nothing runs them" in window._auto_button.get_tooltip_text()
-
-    window.config.set_automation(background=True)
-    window.refresh_summary()
-    assert window._auto_content.get_label() == "Live"
-
-
-@needs_gtk
-def test_each_server_gets_a_tab_owning_its_own_pairs(window):
-    window.config.add_or_update_server("nas", "192.0.2.10", "u", "p", "media", 445)
-    window.config.add_or_update_server("work", "192.0.2.20", "u", "p", "share", 445)
-    window.config.add_pair("/tmp", "backups/tmp", "tmp-pair", server="nas")
-    window.config.set_active_server("nas")
-    window.refresh_servers()
-
-    assert window._stack.get_child_by_name("nas") is not None
-    assert window._stack.get_child_by_name("work") is not None
-    assert window._stack.get_visible_child_name() == "nas"
-    assert window._switcher_bar.get_visible()          # two servers, so tabs show
-
-    # One pair row on 'nas', an empty-state row on 'work'.
-    assert len(window._pair_groups["nas"]["rows"]) == 1
-    assert window._pair_groups["work"]["rows"][0].get_title() == "No sync pairs yet"
-
-    # The tab badge counts that server's pairs, not everyone's.
-    assert window._stack.get_page(
-        window._stack.get_child_by_name("nas")).get_badge_number() == 1
-    assert window._stack.get_page(
-        window._stack.get_child_by_name("work")).get_badge_number() == 0
-
-
-@needs_gtk
 def test_switching_tab_switches_the_active_server(window):
     """The visible tab is the active server — that's what selecting one means."""
     window.config.add_or_update_server("nas", "192.0.2.10", "u", "p", "media", 445)
@@ -785,19 +596,6 @@ def test_switching_tab_switches_the_active_server(window):
 
 
 @needs_gtk
-def test_header_keeps_the_app_title_and_tagline(window):
-    """The tabs live in their own bar so the header can stay the app's."""
-    assert window._window_title.get_title() == "NASync"
-    assert window._window_title.get_subtitle() == "Sync your NAS with CLASS"
-
-    # One server is unambiguous, so the tab bar stays out of the way.
-    window.config.add_or_update_server("solo", "192.0.2.1", "u", "p", "s", 445)
-    window.refresh_servers()
-    assert not window._switcher_bar.get_visible()
-    assert window._window_title.get_subtitle() == "Sync your NAS with CLASS"
-
-
-@needs_gtk
 def test_the_bar_measures_the_current_pair_not_the_whole_run(window):
     """Across a whole run a big folder crawls the bar forward and reads as
     stalled; per pair it fills, resets and fills again."""
@@ -805,8 +603,8 @@ def test_the_bar_measures_the_current_pair_not_the_whole_run(window):
 
     window._update_pair_progress(1, 4, "Documents", "Syncing")
     assert window._progress_bar.get_fraction() == pytest.approx(0.0)
-    assert "pair 1 of 4" in window._progress_detail.get_label()
-    assert "comparing files" in window._progress_detail.get_label()
+    assert "pair 1 of 4" in window._progress_log.get_label()
+    assert "comparing files" in window._progress_log.get_label()
 
     # Half of this pair's files is half a bar, not an eighth of one.
     window._update_file_progress(1, 2, "a.jpg", "Uploading")
@@ -820,11 +618,11 @@ def test_the_bar_measures_the_current_pair_not_the_whole_run(window):
     # through the run we are.
     window._update_pair_progress(2, 4, "Photos", "Syncing")
     assert window._progress_bar.get_fraction() == pytest.approx(0.0)
-    assert "pair 2 of 4" in window._progress_detail.get_label()
+    assert "pair 2 of 4" in window._progress_log.get_label()
 
     window._update_file_progress(2, 2, "b.jpg", "Uploading")
     assert window._progress_bar.get_fraction() == pytest.approx(1.0)
-    assert "Photos (2/4)" in window._progress_detail.get_label()
+    assert "Photos (2/4)" in window._progress_log.get_label()
 
 
 @needs_gtk
@@ -905,53 +703,6 @@ def test_turning_notifications_off_reaches_the_window(window, monkeypatch, recor
 
 
 @needs_gtk
-def test_the_automatic_popover_writes_the_switches(window, monkeypatch):
-    """Instant-apply, and it reconciles the background service exactly as the
-    Settings dialog does — a second door onto the settings, not a second copy."""
-    from nasync.system import service
-
-    applied = []
-    monkeypatch.setattr(service, "apply", lambda config: applied.append(config))
-    monkeypatch.setattr(service, "status",
-                        lambda: {"available": True, "installed": True,
-                                 "active": True, "detail": "Running."})
-
-    popover = AutomaticPopover(window.config)
-    popover._live_switch.set_active(True)
-    assert window.config.get_automation()["live_sync"] is True
-
-    popover._notify_switch.set_active(False)
-    assert window.config.get_notifications() is False
-
-    # Reloading is not the user flipping every switch it touches.
-    window.config.set_automation(live_sync=False)
-    window.config.set_notifications(True)
-    popover.reload()
-    assert window.config.get_automation()["live_sync"] is False
-    assert window.config.get_notifications() is True
-
-
-@needs_gtk
-def test_the_scheduled_time_row_follows_its_switch(window, monkeypatch):
-    from nasync.system import service
-
-    monkeypatch.setattr(service, "apply", lambda config: None)
-    monkeypatch.setattr(service, "status",
-                        lambda: {"available": True, "installed": False,
-                                 "active": False, "detail": "Not installed."})
-
-    window.config.set_automation(scheduled_sync=True, scheduled_time="07:05")
-    popover = AutomaticPopover(window.config)
-
-    assert popover._time_row.get_sensitive()
-    assert int(popover._hour_spin.get_value()) == 7
-    assert int(popover._minute_spin.get_value()) == 5
-
-    popover._scheduled_switch.set_active(False)
-    assert not popover._time_row.get_sensitive()
-
-
-@needs_gtk
 def test_byte_progress_is_throttled_but_never_drops_the_last(window, monkeypatch):
     """A gigabit LAN fires this per 1 MiB chunk — over 100 a second, each one
     relaying out a label — so most are dropped on the worker thread. The one
@@ -970,3 +721,157 @@ def test_byte_progress_is_throttled_but_never_drops_the_last(window, monkeypatch
     # The final chunk of the file bypasses the throttle entirely.
     window._thread_byte_progress(100, 100, "big.iso", "Uploading")
     assert delivered[-1] == (100, 100, "big.iso", "Uploading")
+
+
+# --------------------------------------------------------------------------- #
+# Settings, rewritten in 0.21.0 for the per-server Settings tab. The tests
+# above these used to import AutomaticPopover and ModePopover, removed in
+# 0.17.0; the ImportError was read as "GTK missing" and every widget test in
+# this file was skipped without anyone noticing.
+# --------------------------------------------------------------------------- #
+def _with_server(window, name="nas"):
+    window.config.add_or_update_server(name, "192.0.2.10", "u", "p", "media", 445)
+    window.config.set_active_server(name)
+    window.refresh_servers()
+    return name
+
+
+def _inline_service(monkeypatch, status=None):
+    """Run service reconciliation inline, against a stand-in service."""
+    import nasync.gui.dialogs as dialogs_module
+    from nasync.system import service
+    applied = []
+    state = status or {"available": True, "backend": "systemd", "installed": True,
+                       "active": True, "detail": "Running."}
+    monkeypatch.setattr(service, "apply",
+                        lambda config: applied.append(config) or state)
+    monkeypatch.setattr(service, "status", lambda config=None: state)
+    monkeypatch.setattr(dialogs_module, "run_async",
+                        lambda work, on_done=None, on_error=None: on_done(work()))
+    return applied
+
+
+@needs_gtk
+def test_the_mode_row_applies_instantly_to_its_own_server(window):
+    from nasync.gui.dialogs import SyncModeRow
+    server = _with_server(window)
+    changed = []
+    row = SyncModeRow(window.config, on_changed=changed.append, server=server)
+    assert window.config.get_sync_mode(server) == "mirror"
+
+    row.set_selected(row._modes.index("update"))
+    assert window.config.get_sync_mode(server) == "update"
+    assert changed == ["update"]
+    assert "Nothing is deleted" in row.get_subtitle() or "nothing" in \
+        row.get_subtitle().lower()
+
+    # Reloading is not the user choosing, so it must not report a change.
+    window.config.set_sync_mode("mirror", server=server)
+    row.reload()
+    assert changed == ["update"]
+
+
+@needs_gtk
+def test_automation_switches_save_per_server_and_reach_the_service(window,
+                                                                   monkeypatch):
+    from nasync.gui.dialogs import AutomationRows
+    server = _with_server(window)
+    applied = _inline_service(monkeypatch)
+    rows = AutomationRows(window.config, server=server)
+    assert not rows.live.get_active() and not rows.scheduled.get_active()
+    assert not rows.time.get_sensitive()          # nothing to schedule yet
+
+    rows.live.set_active(True)
+    assert window.config.get_automation(server)["live_sync"] is True
+    rows.scheduled.set_active(True)
+    assert window.config.get_automation(server)["scheduled_sync"] is True
+    assert rows.time.get_sensitive()
+    assert len(applied) >= 2, "a switch saved but never reached the service"
+
+
+@needs_gtk
+def test_the_summary_says_off_live_scheduled_or_paused(window, monkeypatch):
+    from nasync.gui.dialogs import AutomationRows
+    server = _with_server(window)
+    _inline_service(monkeypatch)
+    rows = AutomationRows(window.config, server=server)
+    assert rows.summary() == "Off"
+    window.config.set_automation(live_sync=True, scheduled_sync=True,
+                                 scheduled_time="7:5", server=server)
+    window.config.set_automation(background=True)
+    assert rows.summary() == "Live · daily 07:05"
+    # Triggers on with the background off is neither on nor off, and it's the
+    # state most likely to be mistaken for "it's syncing".
+    window.config.set_automation(background=False)
+    assert rows.summary() == "Paused"
+
+
+@needs_gtk
+def test_turning_the_background_off_keeps_the_triggers(window, monkeypatch):
+    from nasync.gui.dialogs import GlobalAutomationRows
+    server = _with_server(window)
+    _inline_service(monkeypatch)
+    window.config.set_automation(live_sync=True, server=server)
+    window.config.set_automation(background=True)
+    rows = GlobalAutomationRows(window.config)
+    rows.background.set_active(False)
+    assert window.config.get_background() is False
+    assert window.config.get_automation(server)["live_sync"] is True
+
+
+@needs_gtk
+def test_a_missing_background_mechanism_is_said(window, monkeypatch):
+    from nasync.gui.dialogs import GlobalAutomationRows
+    from nasync.system import service
+    server = _with_server(window)
+    window.config.set_automation(live_sync=True, server=server)
+    monkeypatch.setattr(service, "backend", lambda: "")
+    rows = GlobalAutomationRows(window.config)
+    assert "only runs while NASync is open" in rows.background.get_subtitle()
+
+
+@needs_gtk
+def test_the_line_above_sync_says_what_mirror_will_do(window):
+    server = _with_server(window)
+    window.config.add_pair("/tmp", "backups", "tmp-pair", server=server)
+    window.refresh_summary()
+    assert "Mirror" in window._progress_detail.get_label()
+    window.config.set_sync_mode("update", server=server)
+    window.refresh_summary()
+    assert "Update" in window._progress_detail.get_label()
+
+
+@needs_gtk
+def test_a_settings_change_made_elsewhere_reaches_the_settings_tab(window):
+    server = _with_server(window)
+    window.config.set_sync_mode("update", server=server)
+    window.refresh_summary()
+    mode_row, _automation = window._syncing_rows[0]
+    assert mode_row._modes[mode_row.get_selected()] == "update"
+
+
+@needs_gtk
+def test_each_server_gets_a_tab_owning_its_own_pairs(window):
+    window.config.add_or_update_server("nas", "192.0.2.10", "u", "p", "media", 445)
+    window.config.add_or_update_server("work", "192.0.2.20", "u", "p", "share", 445)
+    window.config.add_pair("/tmp", "backups/tmp", "tmp-pair", server="nas")
+    window.config.set_active_server("nas")
+    window.refresh_servers()
+
+    assert window._stack.get_visible_child_name() == "nas"
+    assert len(window._pair_groups["nas"]._rows) == 1
+    assert window._pair_groups["work"]._rows[0].get_title() == "No sync pairs yet"
+    assert window._stack.get_page(
+        window._stack.get_child_by_name("nas")).get_badge_number() == 1
+    assert window._stack.get_page(
+        window._stack.get_child_by_name("work")).get_badge_number() == 0
+
+
+@needs_gtk
+def test_one_server_keeps_the_app_title_in_the_header(window):
+    assert window._window_title.get_title() == "NASync"
+    _with_server(window, "solo")
+    # One server is unambiguous: the header names the app, not a switcher of
+    # one — the Server/Settings bar below it is what's visible instead.
+    assert window._header.get_title_widget() is window._window_title
+    assert window._switcher_bar.get_visible()

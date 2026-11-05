@@ -104,3 +104,15 @@ def configured_config(config_home):
     config.set_active_server("nas")
     config.add_pair(config_home, "/dest", "pair")
     return config
+
+
+def pytest_addoption(parser):
+    """`--lab` runs the end-to-end data-safety lab in tests/lab/.
+
+    Off by default: it needs podman (or docker) and a Samba container, and
+    takes a minute or two. Run it before every release and after any change
+    to how files are compared, copied, renamed or deleted.
+    """
+    parser.addoption("--lab", action="store_true", default=False,
+                     help="run the data-safety lab against a throwaway Samba "
+                          "container (needs podman or docker)")

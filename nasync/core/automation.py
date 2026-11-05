@@ -30,6 +30,7 @@ from watchdog.observers import Observer
 from nasync.system import lan
 from nasync.core import activity
 from nasync.core.activity import SyncBusy
+from nasync.core.samba import ServerIdentityChanged
 from nasync.core.config import Config
 from nasync.system.notify import Notifier
 from nasync.core.sync import Syncer
@@ -70,11 +71,22 @@ def scheduled_run_is_due(scheduled_time: str, last_run: str, now=None) -> bool:
     still owes the day a sync, and gets it at the first opportunity.
     """
     now = now or datetime.datetime.now()
+    today = now.date()
+    if last_run == today.isoformat():
+        return False
+    # A whole day missed — the machine was never awake at the slot (a 23:00
+    # schedule on a laptop that sleeps at 22:30) — runs at the next chance
+    # rather than waiting for a slot it may miss again. Until 0.21.0 such a
+    # day was dropped at midnight, and that laptop never backed up at all.
+    try:
+        last = datetime.date.fromisoformat(last_run) if last_run else None
+    except ValueError:
+        last = None
+    if last is not None and last < today - datetime.timedelta(days=1):
+        return True
     hour, minute = (int(part) for part in scheduled_time.split(":"))
     due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if now < due_at:
-        return False
-    return last_run != now.date().isoformat()
+    return now >= due_at
 
 
 class Automator:
@@ -128,6 +140,17 @@ class Automator:
     # another sync was busy or the NAS was out of reach. Short: both clear up
     # on their own, and the check itself costs a file read and a cached probe.
     CATCH_UP_PAUSE = 5.0
+    # Changes a watcher saw but nothing could sync for this long are said
+    # out loud: a NAS that live sync has wrongly decided is "away", or that
+    # keeps failing, is otherwise silent for as long as it lasts.
+    OWED_ALERT_SECONDS = 3600.0
+    # How often a folder that can't be watched is synced instead, and how often
+    # missing folders are looked for again (a disk that mounts after login).
+    FALLBACK_SECONDS = 900.0
+    WATCH_RECHECK_SECONDS = 60.0
+    # A scheduled server with no successful run for this many days is worth a
+    # notification of its own, whatever the reason.
+    STALE_BACKUP_DAYS = 3
 
     def __init__(self, reporter=print, config=None, notifier=None,
                  server: str = None, sync_lock=None):
@@ -145,10 +168,12 @@ class Automator:
         self._overrides = {}        # CLI flags that beat the saved settings
         self._lan_state = False
         self._lan_checked_at = None
-        self._reported_lan = None   # None = nothing said yet, so the first
-                                    # verdict is always worth logging
+        # None = nothing said yet, so the first verdict is always worth logging.
+        self._reported_lan = None
         # This is the one place a sync happens with nobody watching, so the
         # desktop notification *is* the user interface for it.
+        # Nobody can answer a keyring prompt here; see `Config.interactive`.
+        self.config.interactive = False
         self._notifier = (notifier if notifier is not None
                           else Notifier(enabled=self.config.get_notifications()))
         self._blocked_notice = None
@@ -177,9 +202,19 @@ class Automator:
         # *started* is still owed one — including edits made while it ran,
         # which until 0.20.0 found the lock busy and were simply dropped.
         self._changes_lock = threading.Lock()
-        self._changes_seen = 0
-        self._changes_synced = 0
+        # Per pair since 0.21.0: one pair failing used to clear the changes
+        # owed to every pair, and a change anywhere synced every pair. None is
+        # "all pairs" (a trigger that isn't about one folder).
+        self._seen = {}
+        self._synced = {}
+        self._owed_since = None
+        self._owed_notice = None
         self._catch_up_at = None
+        # Pairs whose folder couldn't be watched, synced on a timer instead.
+        self._fallback = set()
+        self._fallback_at = None
+        self._watch_notice = set()
+        self._stale_notice = None
         #: Why the last `sync_now` didn't run: "busy", "away", or None.
         self.last_skip = None
 
@@ -214,7 +249,8 @@ class Automator:
         else:
             self._report(f"⏸️  Paused — {self._lan_reason()}")
 
-    def sync_now(self, trigger: str = "", scheduled: bool = False) -> bool:
+    def sync_now(self, trigger: str = "", scheduled: bool = False,
+                 pairs=None) -> bool:
         """Sync every pair. Returns True only if at least one pair succeeded.
 
         Skips (rather than fails) when another sync is in flight or the server
@@ -263,29 +299,48 @@ class Automator:
                 self.last_skip = "busy"
                 return False
             with self._changes_lock:
-                started_at_change = self._changes_seen
+                started_at_change = dict(self._seen)
             label = f" ({trigger})" if trigger else ""
             self._report(f"\n🔄 Auto-sync at {time.strftime('%H:%M:%S')}{label}")
             self._notify_started(trigger)
             # The Automator's Config, not a fresh one: `_settings_changed`
             # reloads it when the file changes, and a Syncer that built
             # its own would sync from the settings as they were at start.
+            known = {p["name"] for p in self._watched_pairs()}
+            targets = ([p for p in pairs if p in known] if pairs
+                       else [self._only_pair])
             try:
-                result = Syncer(reporter=self._report, config=self.config,
-                                server=self.server, source="background",
-                                trigger=trigger or "automatic",
-                                ).sync_pair(self._only_pair)
+                result = None
+                for target in targets or [self._only_pair]:
+                    one = Syncer(reporter=self._report, config=self.config,
+                                 server=self.server, source="background",
+                                 trigger=trigger or "automatic",
+                                 ).sync_pair(target)
+                    result = _merge(result, one, target)
             except SyncBusy:
                 # Lost a race with another process starting at the same
                 # moment. Take the placeholder back and try again later.
                 self._take_back_placeholder()
                 self.last_skip = "busy"
                 return False
+            except ServerIdentityChanged as e:
+                # Another machine at the NAS's address: a strange network that
+                # uses the same addresses as home. Treated as being away — no
+                # password was sent — and said once a day, not on every edit.
+                self._take_back_placeholder()
+                self.last_skip = "away"
+                self._report(f"⏸️  {e}")
+                key = (datetime.date.today().isoformat(), "identity")
+                if self._blocked_notice != key:
+                    self._blocked_notice = key
+                    self._post("Not syncing: that isn't your NAS", str(e),
+                               urgency="critical")
+                return False
             self._notify_finished(result)
             if result.get("cancelled"):
                 # Someone pressed Cancel. That is an answer, not a failure to
                 # retry in fifteen minutes behind their back.
-                self._mark_synced(started_at_change)
+                self._mark_synced(started_at_change, None)
                 return True
             if not result.get("ok"):
                 # Nothing got through. Reported as such on the scheduled path so
@@ -301,7 +356,7 @@ class Automator:
             # A run got through, so the next failure is news again rather than
             # a repeat of one already announced.
             self._blocked_notice = None
-            self._mark_synced(started_at_change)
+            self._mark_synced(started_at_change, result.get("pairs"))
             return True
         except Exception as e:
             self._report(f"❌ {e}")
@@ -322,24 +377,44 @@ class Automator:
     # ------------------------------------------------------------------ #
     # Live sync's memory of what is still owed
     # ------------------------------------------------------------------ #
-    def on_files_changed(self) -> None:
+    def note_changes(self, pair: str = None) -> None:
+        """Remember that `pair` (None: every pair) is owed a sync."""
+        with self._changes_lock:
+            self._seen[pair] = self._seen.get(pair, 0) + 1
+            if self._owed_since is None:
+                self._owed_since = time.time()
+
+    def on_files_changed(self, pair: str = None) -> None:
         """A watched folder settled after changing: note it, then try to sync.
 
         Noted first, so that if the sync can't run now — another one is busy,
-        or the NAS is out of reach — the loop knows to come back for it.
+        or the NAS is out of reach — the loop knows to come back for it. Only
+        that folder's pair is synced: a one-file edit used to re-index every
+        pair, which on a large setup is minutes of work.
         """
-        with self._changes_lock:
-            self._changes_seen += 1
-        self.sync_now("file changed")
+        self.note_changes(pair)
+        self.sync_now("file changed", pairs=[pair] if pair else None)
 
-    def _mark_synced(self, upto: int) -> None:
+    def _owed_pairs(self) -> list:
         with self._changes_lock:
-            self._changes_synced = max(self._changes_synced, upto)
+            return [p for p, n in self._seen.items() if n > self._synced.get(p, 0)]
+
+    def _mark_synced(self, upto: dict, outcome) -> None:
+        """Clear what a run covered: per pair, and only where it got through."""
+        with self._changes_lock:
+            for pair, count in upto.items():
+                done = (outcome is None or pair is None and all(
+                    state in ("ok", "held") for state in outcome.values())
+                    or outcome.get(pair) in ("ok", "held"))
+                if done:
+                    self._synced[pair] = max(self._synced.get(pair, 0), count)
+            if not any(n > self._synced.get(p, 0) for p, n in self._seen.items()):
+                self._owed_since = None
+                self._owed_notice = None
         self._catch_up_at = None
 
     def changes_pending(self) -> bool:
-        with self._changes_lock:
-            return self._changes_seen > self._changes_synced
+        return bool(self._owed_pairs())
 
     def catch_up_due(self) -> bool:
         """True when file changes are owed a sync and it is worth trying now."""
@@ -349,7 +424,14 @@ class Automator:
 
     def catch_up(self) -> bool:
         """Sync changes that an earlier trigger couldn't, backing off on failure."""
-        if self.sync_now("catch-up"):
+        owed = self._owed_pairs()
+        pairs = None if None in owed else owed
+        if self.sync_now("catch-up", pairs=pairs):
+            if self.changes_pending():
+                # It ran, but a pair still failed: wait before the next try.
+                # Until 0.21.1 a run that got through cleared the pause, so a
+                # pair failing every time was synced back to back, for ever.
+                self._catch_up_at = time.monotonic() + self.SCHEDULED_RETRY_SECONDS
             return True
         pause = (self.CATCH_UP_PAUSE if self.last_skip in ("busy", "away")
                  else self.SCHEDULED_RETRY_SECONDS)
@@ -445,7 +527,8 @@ class Automator:
         # than a quiet success.
         moved = (result.get("transferred", 0) + result.get("deleted", 0)
                  + result.get("deleted_dirs", 0) + result.get("unsupported", 0)
-                 + result.get("moved", 0))
+                 + result.get("moved", 0) + result.get("conflicts", 0)
+                 + result.get("foreign", 0))
         if not moved and problems <= 0 and not held:
             with self._notify_lock:
                 idle = self._pending is None
@@ -460,7 +543,8 @@ class Automator:
             if self._pending is None:
                 self._pending = dict.fromkeys(
                     ("transferred", "skipped", "deleted", "deleted_dirs",
-                     "moved", "errors", "failed", "unsupported"), 0)
+                     "moved", "errors", "failed", "unsupported", "conflicts",
+                     "foreign"), 0)
                 self._pending["runs"] = 0
                 self._pending["held"] = []
             for key in self._pending:
@@ -542,6 +626,12 @@ class Automator:
                      f"{totals['deleted']} removed"]
             if totals["moved"]:
                 parts.append(f"{totals['moved']} moved")
+        if totals.get("conflicts"):
+            # Someone changed these on the NAS. Nothing was lost — the NAS
+            # versions were kept beside them — but a person should look.
+            parts.append(f"{totals['conflicts']} changed on the NAS, kept as copies")
+        if totals.get("foreign"):
+            parts.append(f"{totals['foreign']} on the NAS not from NASync, left alone")
         counts = "  ·  ".join(parts)
         if totals["held"]:
             # A mirror run held back is the one thing here that needs a
@@ -612,21 +702,108 @@ class Automator:
             pairs = [p for p in pairs if p["name"] == self._only_pair]
         return pairs
 
+    def watch_plan(self) -> frozenset:
+        """The folders live sync should be watching right now."""
+        return frozenset((p["name"], p["local"]) for p in self._watched_pairs()
+                         if os.path.isdir(p["local"]))
+
     def _start_watching(self):
+        """Watch every pair's folder; a folder that can't be watched is synced
+        on a timer instead, and said so — never the end of all automation.
+
+        A watch can fail (the system-wide limit on watched folders, shared
+        with every other app, is the usual reason). That used to raise out of
+        the service before its loop, so every trigger of every server stopped.
+        """
         observer = Observer()
         handlers = []
+        self._fallback = set()
         for pair in self._watched_pairs():
-            if os.path.isdir(pair["local"]):
-                handler = _DebouncedHandler(self.on_files_changed,
-                                            debounce=self.DEBOUNCE)
-                handlers.append(handler)
+            name = pair["name"]
+            if not os.path.isdir(pair["local"]):
+                self._report(f"⚠️  Not watching '{name}': {pair['local']} doesn't exist")
+                self._notify_watch_problem(
+                    name, f"Live sync can't watch '{name}': {pair['local']} "
+                          f"doesn't exist. It will start once the folder appears.")
+                continue
+            handler = _DebouncedHandler(lambda n=name: self.on_files_changed(n),
+                                        debounce=self.DEBOUNCE)
+            try:
                 observer.schedule(handler, pair["local"], recursive=True)
-            else:
-                self._report(f"⚠️  Not watching '{pair['name']}': "
-                             f"{pair['local']} doesn't exist")
-        observer.start()
+                handlers.append(handler)
+            except Exception as e:                   # noqa: BLE001
+                self._watch_failed(name, e)
+        try:
+            observer.start()
+        except Exception as e:                       # noqa: BLE001
+            for handler in handlers:
+                handler.cancel()
+            for pair in self._watched_pairs():
+                self._watch_failed(pair["name"], e)
+            handlers = []
         self._report(f"👁️  Live sync watching {len(handlers)} folder(s)")
         return observer, handlers
+
+    def _watch_failed(self, name: str, error) -> None:
+        self._fallback.add(name)
+        self._fallback_at = time.monotonic() + self.FALLBACK_SECONDS
+        self._report(f"⚠️  Can't watch '{name}' ({error}) — syncing it every "
+                     f"{int(self.FALLBACK_SECONDS // 60)} minutes instead")
+        self._notify_watch_problem(
+            name, f"Live sync can't watch '{name}' ({error}). It will be synced "
+                  f"every {int(self.FALLBACK_SECONDS // 60)} minutes instead.")
+
+    def _notify_watch_problem(self, name: str, body: str) -> None:
+        key = (datetime.date.today().isoformat(), name)
+        if key in self._watch_notice:
+            return
+        self._watch_notice.add(key)
+        self._post("Live sync needs attention", body)
+
+    def fallback_due(self) -> bool:
+        """Folders that couldn't be watched are owed a sync on a timer."""
+        if not self._fallback or self._fallback_at is None:
+            return False
+        if time.monotonic() < self._fallback_at:
+            return False
+        self._fallback_at = time.monotonic() + self.FALLBACK_SECONDS
+        for name in self._fallback:
+            self.note_changes(name)
+        return True
+
+    def check_owed(self) -> None:
+        """Say so once when changes have waited too long for a sync."""
+        since = self._owed_since
+        if since is None or time.time() - since < self.OWED_ALERT_SECONDS:
+            return
+        if self._owed_notice == since:
+            return
+        self._owed_notice = since
+        reason = {"away": self._lan_reason(),
+                  "busy": "another sync kept it waiting"}.get(
+            self.last_skip, "the last attempts failed")
+        self._post("Changes are waiting to be backed up",
+                   f"{self._server_label()}  ·  changes since "
+                   f"{time.strftime('%H:%M', time.localtime(since))} haven't "
+                   f"reached the NAS — {reason}", urgency="critical")
+
+    def check_stale_backup(self, settings) -> None:
+        """A scheduled server with no successful run for days: say so daily."""
+        if not settings["scheduled_sync"] or not settings["last_scheduled_run"]:
+            return
+        try:
+            last = datetime.date.fromisoformat(settings["last_scheduled_run"])
+        except ValueError:
+            return
+        age = (datetime.date.today() - last).days
+        today = datetime.date.today().isoformat()
+        if age < self.STALE_BACKUP_DAYS or self._stale_notice == today:
+            return
+        self._stale_notice = today
+        self._post("No backup for days",
+                   f"{self._server_label()}  ·  the last scheduled sync that "
+                   f"got through was {age} days ago ({last.isoformat()}).",
+                   urgency="critical")
 
     @staticmethod
     def _stop_watching(observer, handlers):
@@ -734,6 +911,8 @@ class _WatchState:
         self.observer = None
         self.handlers = []
         self.watching = False
+        self.plan = frozenset()
+        self.next_watch_check = 0.0
         self.next_interval_tick = None
 
 
@@ -785,10 +964,29 @@ class AutomationRunner:
     # Watching
     # ------------------------------------------------------------------ #
     def _sync_watchers(self, state, wants_live: bool) -> None:
-        """Start or stop one server's watchers to match its live-sync setting."""
+        """Start, stop or re-aim one server's watchers to match its settings.
+
+        Re-aimed when the folders change: a pair added, re-pointed, or whose
+        folder appeared (a disk mounted after login). Until 0.21.0 watchers
+        were only ever started once, so a folder added while the service ran
+        was never watched until it restarted.
+        """
+        plan = state.automator.watch_plan() if wants_live else frozenset()
+        if wants_live and state.watching and plan != state.plan:
+            state.automator._stop_watching(state.observer, state.handlers)
+            state.observer, state.handlers, state.watching = None, [], False
+            # Folders newly watched may hold changes made while they weren't.
+            for name, _path in plan - state.plan:
+                state.automator.note_changes(name)
         if wants_live and not state.watching:
-            state.observer, state.handlers = state.automator._start_watching()
+            try:
+                state.observer, state.handlers = state.automator._start_watching()
+            except Exception as e:                   # noqa: BLE001
+                self._report(f"⚠️  Live sync couldn't start for "
+                             f"{state.automator.label()}: {e}")
+                state.observer, state.handlers = None, []
             state.watching = True
+            state.plan = plan
         elif not wants_live and state.watching:
             state.automator._stop_watching(state.observer, state.handlers)
             state.observer, state.handlers = None, []
@@ -890,6 +1088,15 @@ class AutomationRunner:
                     if not self._runnable(state):
                         continue
 
+                    if live and time.monotonic() >= state.next_watch_check:
+                        state.next_watch_check = (time.monotonic()
+                                                  + Automator.WATCH_RECHECK_SECONDS)
+                        self._sync_watchers(state, live)
+                    if live:
+                        state.automator.fallback_due()
+                        state.automator.check_owed()
+                    state.automator.check_stale_backup(current)
+
                     if state.automator.scheduled_due(current):
                         state.automator.run_scheduled(current)
                         # We just wrote the run date; that's our own edit, not
@@ -926,7 +1133,8 @@ def run_all(reporter=print, config=None, notifier=None, sync_at_start=None):
     servers: before 0.18.0 this ran whichever server happened to be active, so
     a second NAS was never automated at all.
     """
-    config = config or Config()
+    config = config or Config(interactive=False)
+    config.interactive = False
     lock = threading.Lock()
     # One per *configured* server, not per currently-automated one: an
     # automator holds nothing but state until a trigger turns on, and building
@@ -943,3 +1151,25 @@ def run_all(reporter=print, config=None, notifier=None, sync_at_start=None):
         )
     return AutomationRunner(automators, config=config,
                             reporter=reporter).run(sync_at_start=sync_at_start)
+
+
+def _merge(total, result, pair=None):
+    """Fold one Syncer result into the total of a multi-pair automatic run."""
+    if total is None:
+        merged = dict(result)
+        if "pairs" not in merged and pair is not None:
+            merged["pairs"] = {pair: "ok" if result.get("ok") else "failed"}
+        return merged
+    merged = dict(total)
+    for key, value in result.items():
+        if isinstance(value, bool):
+            merged[key] = merged.get(key, False) or value
+        elif isinstance(value, (int, float)):
+            merged[key] = merged.get(key, 0) + value
+        elif isinstance(value, list):
+            merged[key] = merged.get(key, []) + value
+        elif isinstance(value, dict):
+            merged[key] = {**merged.get(key, {}), **value}
+    if "pairs" not in result and pair is not None:
+        merged.setdefault("pairs", {})[pair] = "ok" if result.get("ok") else "failed"
+    return merged

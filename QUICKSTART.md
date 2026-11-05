@@ -145,8 +145,9 @@ files, in either mode. Not sure what a sync would do? `nasync sync --dry-run`
 lists it without transferring anything.
 
 Mirror won't run on an empty local folder (that's a folder that moved, not one
-you want wiped from the NAS), and asks before deleting more than half of a
-folder's server files. `nasync status` shows a sync in progress — from the
+you want wiped from the NAS), asks before deleting or overwriting more than half
+of a folder's server files, never overwrites a file someone changed on the NAS
+(it keeps theirs as a "NAS copy"), and never deletes files it didn't put there. `nasync status` shows a sync in progress — from the
 background service too — and `nasync cancel` stops it.
 
 ### Automatic syncing

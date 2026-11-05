@@ -446,7 +446,7 @@ _PRE_0_18 = {
 }
 
 
-def test_migration_gives_the_old_settings_to_the_active_server_only():
+def test_migration_gives_triggers_to_the_active_server_and_the_mode_to_all():
     """Nothing that wasn't syncing by itself before the upgrade starts doing so
     because of it — inheriting a trigger would begin unattended mirror syncs on
     a NAS nobody asked to automate."""
@@ -464,7 +464,10 @@ def test_migration_gives_the_old_settings_to_the_active_server_only():
         work = c.get_automation("work")
         assert work["live_sync"] is False and work["scheduled_sync"] is False
         assert work["scheduled_time"] == "02:00"        # the default, not 03:30
-        assert c.get_sync_mode("work") == "mirror"      # the default, not update
+        # But the *mode* governed every server before 0.18.0, so every server
+        # keeps it. Until 0.21.0 this said "mirror": a colleague's update-mode
+        # share became a mirror one on upgrade, and its next sync deleted.
+        assert c.get_sync_mode("work") == "update"
         assert c.automated_servers() == ["home"]
 
         # `background` is app-wide and stays where it was.
@@ -474,7 +477,7 @@ def test_migration_gives_the_old_settings_to_the_active_server_only():
         # One source of truth afterwards: the global copies are gone.
         assert "sync_mode" not in c.data
         assert "live_sync" not in c.data.get("automation", {})
-        print("✅ test_migration_gives_the_old_settings_to_the_active_server_only passed")
+        print("✅ migration test passed")
 
 
 def test_migration_is_idempotent_and_does_not_undo_later_changes():
@@ -535,9 +538,9 @@ def test_record_scheduled_run_does_not_clobber_concurrent_edits():
 # re-picking a folder in mirror mode is the operation with the worst failure
 # mode NASync has.
 # --------------------------------------------------------------------------- #
-import pytest
+import pytest  # noqa: E402
 
-import nasync.core.config as config_module
+import nasync.core.config as config_module  # noqa: E402
 
 
 @pytest.fixture
@@ -704,7 +707,6 @@ if __name__ == "__main__":
     test_sync_mode()
     test_automation_defaults_to_off()
     test_background_gates_the_service_without_clearing_triggers()
-    test_hints_are_remembered()
     test_scheduled_time_is_validated_and_normalized()
     test_legacy_automation_keys_migrate_to_live_sync()
     test_record_scheduled_run_does_not_clobber_concurrent_edits()
@@ -847,3 +849,104 @@ def test_overlaps_already_in_an_old_config_are_found(configured_config):
     config.get_pairs().append({"name": "icons", "local": "/x", "server": "dest"})
     config.get_pairs().append({"name": "ok", "local": "/y", "server": "apart"})
     assert config.overlapping_pairs() == {"pair": ["icons"], "icons": ["pair"]}
+
+
+def test_a_change_made_elsewhere_is_not_undone_by_a_long_open_config(config_home):
+    """The app holds one Config for hours; the CLI writes meanwhile."""
+    app = Config()
+    app.add_or_update_server("nas", "10.0.0.2", "u", "p", "share", 445)
+    app.add_pair("/tmp", "docs", "docs", server="nas")
+
+    cli = Config()
+    cli.set_sync_mode("update", server="nas")
+    cli.remove_pair("docs", server="nas")
+
+    app.set_notifications(False)                 # any unrelated toggle
+    fresh = Config()
+    assert fresh.get_sync_mode("nas") == "update", "the CLI's mode was undone"
+    assert fresh.get_pairs("nas") == [], "a removed pair came back"
+    assert fresh.get_notifications() is False
+
+
+def test_a_save_is_never_half_written(config_home):
+    import os
+    config = Config()
+    config.add_or_update_server("nas", "10.0.0.2", "u", "p", "share", 445)
+    leftovers = [n for n in os.listdir(config.config_dir) if n.endswith(".tmp")]
+    assert leftovers == []
+
+
+def test_the_service_never_prompts_for_the_keyring(config_home, monkeypatch):
+    from nasync.system import vault
+    asked = []
+    monkeypatch.setattr(vault, "is_envelope", lambda data: True)
+    monkeypatch.setattr(vault, "unseal",
+                        lambda data, allow_prompt=True: asked.append(allow_prompt) or {})
+    config = Config()
+    import json
+    config.creds_file.write_text(json.dumps({"sealed": 1}))
+    config._creds_cache = None
+    unattended = Config(interactive=False)
+    unattended._creds_cache = None
+    unattended._read_creds()
+    assert asked[-1] is False
+
+
+def test_switching_the_schedule_on_waits_for_its_slot(configured_config):
+    import datetime
+    from nasync.core.automation import scheduled_run_is_due
+    config = configured_config
+    config.set_automation(last_scheduled_run="2025-01-01", server="nas")
+    config.set_automation(scheduled_sync=True, scheduled_time="23:59", server="nas")
+    settings = config.get_automation("nas")
+    early = datetime.datetime.combine(datetime.date.today(), datetime.time(8, 0))
+    assert not scheduled_run_is_due(settings["scheduled_time"],
+                                    settings["last_scheduled_run"], now=early)
+
+
+def test_samba_identities_are_only_names():
+    from nasync.core.config import identity_is_weak
+    assert identity_is_weak("72617370-6265-7272-7970-690000000000")   # "raspberrypi"
+    assert identity_is_weak("00000000-0000-0000-0000-000000000000")
+    assert not identity_is_weak("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+
+
+def test_two_nases_with_the_same_default_name_are_not_one_storage(tmp_path, monkeypatch):
+    """Samba's identity is its host name: a second "raspberrypi" was refused
+    as the same storage as the first (second audit, G4)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from nasync.system import vault
+    monkeypatch.setattr(vault, "backend", lambda: "")
+    from nasync.core.config import Config
+    config = Config()
+    weak = "72617370-6265-7272-7970-690000000000"
+    config.add_or_update_server("home", "10.0.0.5", "u", "p", "share", 445)
+    config.add_or_update_server("offsite", "10.0.0.6", "u", "p", "share", 445)
+    config.add_or_update_server("alias", "10.0.0.5", "u", "p", "share", 445)
+    for name in ("home", "offsite", "alias"):
+        config.set_server_identity(name, weak)
+    assert not config.same_storage("home", "offsite")
+    assert config.same_storage("home", "alias")
+    config.set_server_identity("alias", "6f746865-7262-6f78-0000-000000000000")
+    assert not config.same_storage("home", "alias")      # another name: another box
+
+
+def test_renaming_a_server_carries_its_identity_and_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from nasync.system import vault
+    monkeypatch.setattr(vault, "backend", lambda: "")
+    from nasync.core import state
+    from nasync.core.config import Config
+    config = Config()
+    config.add_or_update_server("nas", "10.0.0.5", "u", "p", "share", 445)
+    config.set_server_identity("nas", "3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+    record = state.SyncState(config.config_dir, "nas", "share", "docs")
+    record.register()
+    record.mark_initialised()
+    record.close()
+    config.save_server("home-nas", "10.0.0.5", "u", "p", "share", 445, orig_name="nas")
+    assert config.get_server_config("home-nas")["identity"] == \
+        "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    moved = state.SyncState(config.config_dir, "home-nas", "share", "docs")
+    assert moved.initialised
+    moved.close()

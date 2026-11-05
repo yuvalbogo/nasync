@@ -2,6 +2,124 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.1] - 2026-11-05
+
+The second data-safety audit, run against 0.21.0's new mechanisms. Every
+finding below was proven against a real Samba server first; each is now a lab
+test (`tests/lab/test_second_audit.py`).
+
+### Fixed — could lose data
+- **One unreadable item kept a pair in bootstrap for ever** (a root-owned
+  `lost+found`, one `chmod 000` file), so mirror kept deleting files other
+  people put on the NAS. Problems reading *local* files no longer block it.
+- **Renaming a server entry discarded its record**, so the next mirror run
+  deleted conflict copies and other people's files. The record, identity and
+  settings now move with the name, and conflict copies are never deleted.
+- **A new "Notes.txt" beside "notes.txt" replaced the backup of notes.txt.**
+  The name the NAS already has is the one kept.
+- **Case twins created on the NAS lost one backup** after a restore and a sync.
+- **A NAS edit made exactly an hour after the upload was overwritten**, read as
+  a FAT volume's DST shift. That is now assumed only when most files moved.
+- **Ctrl+C in the middle of replacing a file left it only under a hidden
+  name**, which restore skipped and the next sync deleted. The old copy is put
+  back on any interruption, and recovered by the next sync or restore if not.
+- **A killed restore's half-written file was uploaded**, on every run.
+
+### Fixed — wrong or stuck
+- **A confirmed "yes" was refused again** whenever the held run had also done
+  ordinary edits. A yes now covers the held deletions and overwrites separately.
+- **File names over ~235 bytes could be neither backed up nor restored** (the
+  temporary name was too long). Long names get a short temporary name.
+- **Update mode never learned pre-record leftovers**, so switching to mirror
+  never removed files deleted long ago. They are recorded, and the first
+  mirror run asks before deleting 50 or more.
+- **Live sync retried a failing folder back to back**, without a pause.
+- **Two NASes with the same default host name were "the same storage"**:
+  Samba's identity is only its name, so the second NAS of a 3-2-1 setup was
+  refused. Addresses decide in that case.
+- Removing a server entry now removes its record too.
+
+## [0.21.0] - 2026-11-05
+
+A data-safety release. Everything below was found by a new test lab that runs
+NASync against a real Samba server, and by an adversarial audit of the code
+for ways a backup can lose data or differ from what its owner assumes. See
+[DATA_SAFETY.md](DATA_SAFETY.md) for the promises and how they're checked.
+
+### Fixed — could lose data
+- **An interrupted restore could destroy the backup.** A cancelled or dropped
+  restore left a truncated local file, which the next sync uploaded over the
+  only complete copy. Downloads now go to a temporary file and replace the
+  real one only when complete.
+- **An interrupted upload left a truncated file on the NAS** in place of the
+  good copy. Uploads are now written under a temporary name and renamed into
+  place (with a safe three-step swap on Samba, which refuses a direct replace).
+- **Restore overwrote unsynced local work** whenever the size differed. It
+  now keeps any local file changed since it was last backed up (or newer than
+  the server's copy) and says so. Restoring from a server folder that doesn't
+  exist is an error instead of "✅ Restore completed!".
+- **Files someone else put on the NAS were deleted by mirror**, and **files
+  edited on the NAS were overwritten**. NASync now keeps a record of what it
+  uploaded: a file it didn't put there is never deleted, and one changed on
+  the NAS is kept as `name (NAS copy DATE TIME).ext` before your copy goes up.
+- **An unreadable folder made its backup look deleted** — including a folder
+  that can be listed but not entered, and FUSE mounts returning I/O errors.
+  Anything unreadable is now protected and reported.
+- **Mass overwrites were never questioned** — ransomware or a broken tool
+  rewriting every file would have overwritten every backup in one run. They
+  are now held back like mass deletes. The background service holds back at
+  20% (a person is asked at 50%), a held run still backs up new files, and a
+  yes covers exactly the files that were shown.
+- **Upgrading from before 0.18 turned "update" servers into mirror ones.**
+  The old app-wide mode now carries over to every server, not only the active
+  one. *If you upgraded through 0.18–0.20 with several servers, check each
+  one's mode with `nasync status`.*
+- **A long-open app undid settings changed elsewhere.** It held the config as
+  it was when opened and saved it whole, restoring a mode, root or pair
+  changed from the CLI. Every change now re-reads the file first, saves are
+  atomic, and the app picks up outside changes.
+- **The same NAS added as two servers** (a LAN address and a VPN name) let
+  pairs on the two overlap and delete each other's files. Overlaps are now
+  checked across entries that reach the same NAS.
+- **An older version put back locally never reached the NAS** if it was the
+  same size, and two files swapping names went unnoticed.
+
+### Fixed — backups silently missing
+- Two names differing only in letter case (README / readme) collided on the
+  share and one silently replaced the other; now reported, never collided.
+- Symlinked folders, broken symlinks and empty folders were skipped without a
+  word; links are reported and empty folders created.
+- Live sync never watched folders added while the service ran; one watcher
+  failure (the system limit on watched folders) stopped every trigger of every
+  server. Watchers now follow the pairs, and a folder that can't be watched is
+  synced every 15 minutes, with a notification.
+- A schedule the machine was never awake for never ran; a whole missed day
+  now runs at the next chance, and a server with no backup for three days
+  sends a notification. Changes waiting more than an hour are announced too.
+- One pair failing cleared the changes owed to all of them; a change now
+  syncs only its own folder and stays owed until that folder succeeds.
+- A NAS at a Tailscale/CGNAT address (100.64.0.0/10) always counted as away.
+- `nasync sync` exited 0 when files failed; it now exits non-zero. A local
+  file that couldn't be read was reported as "Server unreachable".
+- A locked keyring made the background service wait on a password prompt and
+  then report "Authentication failed"; it now never prompts and says the
+  saved passwords couldn't be read.
+
+### Added
+- **Your password only goes to your NAS.** NASync remembers the NAS's
+  identity on first contact and won't send credentials to a different machine
+  at the same address. After replacing your NAS: `nasync trust`, or answer
+  *Trust It* in the app.
+- **A sync record** (`sync-state.db`) — see *How It Works* in the README.
+- **The data-safety lab**: `make lab` runs NASync against a throwaway Samba
+  container — edge cases, random edit histories and every audit finding.
+- The 45 desktop-app tests run again: they had been skipped since 0.17.0
+  because an outdated import was mistaken for "GTK not installed".
+
+### Changed
+- Live sync syncs only the folder that changed, not every pair.
+- `flake8` pinned to 7.5.0 (6.0.0 doesn't run on Python 3.15).
+
 ## [0.20.0] - 2026-11-05
 
 ### Fixed

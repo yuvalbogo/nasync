@@ -245,5 +245,3 @@ def enumerate_shares(pipe) -> list:
     if len(reply) < 24 or reply[2] != PTYPE_RESPONSE:
         raise SrvsvcError("The server didn't answer the share query.")
     return parse_share_enum(reply[24:])
-
-
