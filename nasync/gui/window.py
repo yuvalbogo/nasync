@@ -46,6 +46,15 @@ MODE_PRESENTATION = {
 }
 
 
+def _spinner() -> Gtk.Widget:
+    """libadwaita's spinner where there is one (1.6+), else GTK's."""
+    if hasattr(Adw, "Spinner"):
+        return Adw.Spinner()
+    spinner = Gtk.Spinner()
+    spinner.start()
+    return spinner
+
+
 def _icon_button(icon_name: str, tooltip: str, handler, *args) -> Gtk.Button:
     """The flat, vertically-centred icon button used throughout the rows."""
     button = Gtk.Button(icon_name=icon_name)
@@ -54,6 +63,42 @@ def _icon_button(icon_name: str, tooltip: str, handler, *args) -> Gtk.Button:
     button.set_tooltip_text(tooltip)
     button.connect("clicked", handler, *args)
     return button
+
+
+def _home_relative(path: str) -> str:
+    """'/home/me/Pictures' as '~/Pictures' — the part a person reads."""
+    home = os.path.expanduser("~")
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+
+#: A pair's last outcome as ``(short label, icon, longer sentence)``.
+PAIR_STATES = {
+    "ok": ("Synced", "object-select-symbolic", "Last {kind} {when} went through."),
+    "held": ("Held back", "dialog-warning-symbolic",
+             "Last sync {when} held back deletions or overwrites. Sync again "
+             "to see what, and decide."),
+    "failed": ("Problem", "dialog-warning-symbolic",
+               "Last {kind} {when} didn't finish cleanly. Sync again and use "
+               "Show errors to see why."),
+    "skipped": ("Skipped", "dialog-warning-symbolic",
+                "Last sync {when} skipped it: its server folder overlaps another pair's."),
+}
+
+
+def _pair_state_text(state: dict) -> tuple:
+    """``(label, icon, tooltip)`` for a pair's row, from `read_pairs`."""
+    if not state:
+        return ("Not synced yet", None, "NASync hasn't synced this folder yet.")
+    label, icon, sentence = PAIR_STATES.get(state.get("outcome"), PAIR_STATES["failed"])
+    kind = "restore" if state.get("direction") == "pull" else "sync"
+    stamp = activity.when(state.get("when", 0))
+    if label == "Synced":
+        label = "Restored" if kind == "restore" else "Synced"
+        short = stamp.replace("today at ", "").replace(" at ", " ")
+        label = f"{label} {short}"
+    return (label, icon, sentence.format(kind=kind, when=stamp))
 
 
 def _confirm(parent, heading: str, body: str, verb: str, handler, *args) -> None:
@@ -112,6 +157,8 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._current_file = None
         self._current_pair = None
         self._errors = []
+        self._preview = []
+        self._last_dry_run = False
         self._rebuilding = False
         self._last_byte_update = 0.0
         self._last_toast = None
@@ -123,6 +170,11 @@ class NasyncWindow(Adw.ApplicationWindow):
         #: nothing is. See `_poll_activity`.
         self._bg_status = None
         self._bg_cancelling = False
+        #: What this window is running: direction, dry_run, server, pair.
+        self._run = {}
+        self._run_actions = {}
+        #: A finished run's result stays on screen until something replaces it.
+        self._showing_result = False
 
         self._toasts = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
@@ -173,16 +225,26 @@ class NasyncWindow(Adw.ApplicationWindow):
 
         toolbar.add_bottom_bar(self._build_action_bar())
 
+        # Persistent states that need doing something about — background
+        # syncing that is set up but not running — sit above everything.
+        self._banner = Adw.Banner()
+        self._banner.connect("button-clicked", self._on_banner_clicked)
+        self._banner_action = None
+        toolbar.add_top_bar(self._banner)
+
         self._toasts.set_child(toolbar)
         self.set_content(self._toasts)
 
         self._pair_groups = {}
         self._syncing_rows = []
+        self._install_pair_actions()
         self.refresh_servers()
         # What the background service (or the CLI) is doing, checked once a
         # second. Until 0.20.0 the window had no way to know: a scheduled sync
         # could be twenty minutes in while this said "Idle".
         GLib.timeout_add_seconds(1, self._poll_activity)
+        GLib.timeout_add_seconds(1, self._tick)
+        self._service_checked = 0.0
         self._repair_installs()
         self.refresh_summary()
 
@@ -285,10 +347,26 @@ class NasyncWindow(Adw.ApplicationWindow):
             # mode, so sync skips them; the row says why, so the skip is never
             # a mystery found in a log.
             clashes = self.config.overlapping_pairs(server_name)
+            states = activity.read_pairs(self.config.config_dir, server_name)
             for pair in pairs:
-                row = Adw.ActionRow(title=pair["name"],
-                                    subtitle=f"{pair['local']}  →  {pair['server']}")
+                row = Adw.ActionRow(
+                    title=pair["name"],
+                    subtitle=f"{_home_relative(pair['local'])}  →  {pair['server']}")
                 row.set_subtitle_lines(1)
+                row.set_tooltip_text(f"{pair['local']}  →  "
+                                     f"{self.config.resolve_remote(pair['server'], server_name)}")
+                # The icon slot says what's happening to this folder: a
+                # spinner while it syncs, a warning when it needs looking at.
+                icon_slot = Gtk.Stack()
+                icon_slot.add_named(Gtk.Image(icon_name="folder-symbolic"), "idle")
+                icon_slot.add_named(Gtk.Image(icon_name="dialog-warning-symbolic"), "warn")
+                icon_slot.add_named(_spinner(), "busy")
+                row.add_prefix(icon_slot)
+                status = Gtk.Label()
+                status.add_css_class("dim-label")
+                status.add_css_class("caption")
+                status.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(status)
                 if pair["name"] in clashes:
                     row.set_subtitle(
                         f"Skipped: shares its server folder with "
@@ -296,19 +374,93 @@ class NasyncWindow(Adw.ApplicationWindow):
                         f"it a folder of its own.")
                     row.set_subtitle_lines(2)
                     row.add_css_class("error")
-                    row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+                    icon_slot.set_visible_child_name("warn")
+                    status.set_label("Skipped")
                 else:
-                    row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
-                row.add_suffix(_icon_button(
-                    "document-edit-symbolic", "Edit this pair",
-                    self._on_edit_pair, pair["name"], server_name))
-                row.add_suffix(_icon_button(
-                    "user-trash-symbolic", "Remove this pair",
-                    self._on_remove_pair, pair["name"], server_name))
+                    label, icon, tooltip = _pair_state_text(states.get(pair["name"]))
+                    status.set_label(label)
+                    status.set_tooltip_text(tooltip)
+                    if icon == "dialog-warning-symbolic":
+                        icon_slot.set_visible_child_name("warn")
+                        status.remove_css_class("dim-label")
+                        status.add_css_class("warning")
+                row.add_suffix(self._pair_menu(pair["name"], server_name))
+                row._nasync = {"pair": pair["name"], "icon": icon_slot,
+                               "status": status}
                 group.add(row)
                 rows.append(row)
 
         group._rows = rows
+
+    def _pair_menu(self, pair: str, server_name: str) -> Gtk.MenuButton:
+        """Everything that can be done to one folder, behind one button.
+
+        One menu rather than a row of icons (GNOME's pattern for a list row),
+        and the only way to sync, preview or restore a single folder from the
+        app — which the command line could always do with --pair.
+        """
+        from gi.repository import Gio
+        target = GLib.Variant("(ss)", (server_name, pair))
+        model = Gio.Menu()
+        run = Gio.Menu()
+        for label, action in (("Sync Now", "win.pair-sync"),
+                              ("Preview Sync", "win.pair-preview"),
+                              ("Restore…", "win.pair-restore"),
+                              ("Preview Restore", "win.pair-preview-restore")):
+            item = Gio.MenuItem.new(label, None)
+            item.set_action_and_target_value(action, target)
+            run.append_item(item)
+        model.append_section(None, run)
+        manage = Gio.Menu()
+        for label, action in (("Edit…", "win.pair-edit"),
+                              ("Remove…", "win.pair-remove")):
+            item = Gio.MenuItem.new(label, None)
+            item.set_action_and_target_value(action, target)
+            manage.append_item(item)
+        model.append_section(None, manage)
+        button = Gtk.MenuButton(icon_name="view-more-symbolic", menu_model=model)
+        button.set_valign(Gtk.Align.CENTER)
+        button.add_css_class("flat")
+        button.set_tooltip_text(f"Actions for '{pair}'")
+        return button
+
+    def _install_pair_actions(self) -> None:
+        """The row menus' actions, each taking (server, pair)."""
+        from gi.repository import Gio
+        handlers = {
+            "pair-sync": lambda s, p: self.start_transfer("push", False, server=s, pair=p),
+            "pair-preview": lambda s, p: self.start_transfer("push", True, server=s, pair=p),
+            "pair-restore": lambda s, p: self.confirm_restore(server=s, pair=p),
+            "pair-preview-restore": lambda s, p: self.start_transfer(
+                "pull", True, server=s, pair=p),
+            "pair-edit": lambda s, p: self._on_edit_pair(None, p, s),
+            "pair-remove": lambda s, p: self._on_remove_pair(None, p, s),
+        }
+        for name, handler in handlers.items():
+            action = Gio.SimpleAction.new(name, GLib.VariantType.new("(ss)"))
+            action.connect("activate", lambda _a, value, h=handler: h(*value.unpack()))
+            self.add_action(action)
+            self._run_actions[name] = action
+
+    def _mark_pair_busy(self, server_name: str, pair) -> None:
+        """Spinner on the folder being synced (`pair` None: none)."""
+        group = self._pair_groups.get(server_name)
+        for row in getattr(group, "_rows", []):
+            info = getattr(row, "_nasync", None)
+            if not info:
+                continue
+            busy = pair is not None and info["pair"] == pair
+            slot = info["icon"]
+            if busy:
+                slot.set_visible_child_name("busy")
+                info["status"].set_label("Syncing…" if self._run.get("direction")
+                                         != "pull" else "Restoring…")
+            elif slot.get_visible_child_name() == "busy":
+                # Finished within this run; the real outcome replaces this
+                # when the run ends and the rows are rebuilt.
+                slot.set_visible_child_name("idle")
+                info["status"].set_label("Checked" if self._run.get("dry_run")
+                                         else "Done")
 
     def _build_settings_tab(self, name: str) -> Adw.PreferencesPage:
         """This server's own mode and triggers.
@@ -499,7 +651,9 @@ class NasyncWindow(Adw.ApplicationWindow):
         log_scroll.set_child(self._progress_log)
         box.append(log_scroll)
 
-        detail_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        # Text above its button, not beside it: beside, a long result line
+        # wrapped into a narrow column.
+        detail_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         detail_row.set_halign(Gtk.Align.CENTER)
 
         # Visible, unlike its predecessor: this label was created hidden and
@@ -514,6 +668,7 @@ class NasyncWindow(Adw.ApplicationWindow):
 
         self._details_button = Gtk.Button(label="Show errors")
         self._details_button.add_css_class("flat")
+        self._details_button.set_halign(Gtk.Align.CENTER)
         self._details_button.set_visible(False)
         self._details_button.connect("clicked", lambda *_: self.show_error_details())
         detail_row.append(self._details_button)
@@ -614,26 +769,60 @@ class NasyncWindow(Adw.ApplicationWindow):
             mode_row.reload()
             automation.reload()
 
-        if self._busy:
+        if self._busy or self._bg_status is not None or self._showing_result:
             return
 
         active = self.config.get_active_server_name()
+        self._progress_bar.set_fraction(0.0)
+        self._details_button.set_visible(False)
         if not active:
+            self._progress_title.set_label("Welcome")
             self._progress_detail.set_label("Add a server to get started.")
             return
 
         count = self.config.count_pairs(active)
         if not count:
-            self._progress_detail.set_label(f"'{active}' has no sync pairs yet.")
+            self._progress_title.set_label("No folders yet")
+            self._progress_detail.set_label(
+                f"Add a folder to '{active}' to start backing it up.")
             return
 
-        summary = f"{label} · sends {count} folder(s) to '{active}'{consequence}"
+        lines = [f"{label} · sends {count} folder(s) to '{active}'{consequence}"]
         # The run that happened while the window was closed is the one people
         # open the app to ask about.
         last = activity.read_last(self.config.config_dir)
-        if last:
-            summary += "\n" + activity.describe_last(last)
-        self._progress_detail.set_label(summary)
+        if last and last.get("server") in ("", active):
+            self._progress_title.set_label(activity.headline(last))
+            lines.append(activity.describe_last(last, with_time=False))
+        else:
+            self._progress_title.set_label("Not synced yet")
+        lines.append(self._automation_line(active))
+        self._progress_detail.set_label("\n".join(lines))
+
+    def _automation_line(self, server: str) -> str:
+        """What will sync next without anyone pressing anything."""
+        import datetime
+        settings = self.config.get_automation(server)
+        if not (settings["live_sync"] or settings["scheduled_sync"]):
+            return "Automatic syncing is off: it syncs when you press Sync."
+        if not settings["background"]:
+            return ("Automatic syncing is paused: turn on Run in the background "
+                    "in App settings.")
+        parts = []
+        if settings["live_sync"]:
+            parts.append("live sync on")
+        if settings["scheduled_sync"]:
+            hour, minute = (int(x) for x in settings["scheduled_time"].split(":"))
+            now = datetime.datetime.now()
+            slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if settings.get("last_scheduled_run") == now.date().isoformat():
+                parts.append(f"next scheduled sync tomorrow at {settings['scheduled_time']}")
+            elif now < slot:
+                parts.append(f"next scheduled sync today at {settings['scheduled_time']}")
+            else:
+                parts.append(f"today's {settings['scheduled_time']} sync runs at the "
+                             f"next chance")
+        return "Automatic: " + ", ".join(parts)
 
     #: A repeat of the same message inside this many seconds is swallowed. One
     #: settings change can report itself twice — once on write, once when the
@@ -726,6 +915,7 @@ class NasyncWindow(Adw.ApplicationWindow):
         name = stack.get_visible_child_name()
         if self._rebuilding or not name or name == "none":
             return
+        self._showing_result = False
         # Re-aim the Server/Settings switcher even when the active server is
         # unchanged: the stack it points at belongs to the visible page.
         self._bind_sub_switcher(name)
@@ -855,12 +1045,32 @@ class NasyncWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------------ #
     # Transfers
     # ------------------------------------------------------------------ #
-    def confirm_restore(self) -> None:
-        _confirm(self, "Restore from the server?",
-                 "Files on the server overwrite the matching local files. "
-                 "Local changes that haven't been synced will be lost.",
-                 "Restore",
-                 lambda _d, r: self.start_transfer("pull", False) if r == "restore" else None)
+    def confirm_restore(self, server: str = None, pair: str = None) -> None:
+        """Ask before restoring, with a preview one click away.
+
+        Since 0.21.0 a restore never overwrites a file changed since its last
+        backup, and never deletes anything local; the old wording ("local
+        changes will be lost") described a danger that no longer exists, and
+        scared people off the one thing a backup is for.
+        """
+        server = server or self.config.get_active_server_name()
+        what = f"'{pair}'" if pair else "every folder of " f"'{server}'"
+        dialog = Adw.AlertDialog(
+            heading=f"Restore {pair if pair else 'from the server'}?",
+            body=f"Files missing from {what} are copied back from the server, "
+                 f"and local files that are older than the backup are updated. "
+                 f"Files you changed since the last backup are kept, and "
+                 f"nothing local is deleted.\n\nPreview lists every file first.")
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("preview", "Preview")
+        dialog.add_response("restore", "Restore")
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("preview")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", lambda _d, response: (
+            self.start_transfer("pull", response == "preview", server=server, pair=pair)
+            if response in ("preview", "restore") else None))
+        dialog.present(self)
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -873,11 +1083,22 @@ class NasyncWindow(Adw.ApplicationWindow):
             # window that has no server to sync to.
             self._set_actions_sensitive(
                 bool(self.config.get_active_server_name()))
+        for name, action in self._run_actions.items():
+            if name not in ("pair-edit", "pair-remove"):
+                action.set_enabled(not busy and self._bg_status is None)
         self._cancel_button.set_sensitive(busy)
 
+    @staticmethod
+    def _run_title(direction: str, dry_run: bool, pair: str = None) -> str:
+        """What is running, in the words of the button that started it."""
+        verb = {("push", False): "Syncing", ("push", True): "Previewing sync",
+                ("pull", False): "Restoring", ("pull", True): "Previewing restore"}
+        return f"{verb[(direction, dry_run)]}{f' {pair!r}' if pair else ''}…"
+
     def start_transfer(self, direction: str, dry_run: bool,
-                       confirmed: dict = None) -> None:
-        """Run a sync, dry run or restore.
+                       confirmed: dict = None, server: str = None,
+                       pair: str = None) -> None:
+        """Run a sync, dry run or restore — of every pair, or of `pair`.
 
         `confirmed` maps pairs whose run was held back to the fingerprint of
         what the person saw and agreed to; only those are run, with that yes —
@@ -885,22 +1106,25 @@ class NasyncWindow(Adw.ApplicationWindow):
         """
         if self._busy or self._bg_status is not None:
             return
-        if not self.config.get_active_server_name():
+        server = server or self.config.get_active_server_name()
+        if not server:
             self.toast("Pick a server first.")
             return
 
         self._cancel_event = threading.Event()
         self._started_at = time.monotonic()
         self._errors = []
+        self._preview = []
+        self._run = {"direction": direction, "dry_run": dry_run,
+                     "server": server, "pair": pair}
+        self._showing_result = False
         self._set_busy(True)
         self._progress_bar.set_fraction(0.0)
         self._details_button.set_visible(False)
-        # From here there is a running commentary worth showing; it stays up
-        # afterwards so a finished run's file list is still readable.
         self._log_scroll.set_visible(True)
-        verb = "Syncing" if direction == "push" else "Restoring"
-        self._progress_title.set_label(f"{verb}{' (dry run)' if dry_run else ''}…")
-        self._progress_detail.set_label("Starting…")
+        self._progress_title.set_label(self._run_title(direction, dry_run, pair))
+        self._progress_log.set_label("Starting…")
+        self._progress_detail.set_label(f"'{server}'  ·  {self._elapsed()}")
 
         self._current_pair = None
         self._current_file = None
@@ -910,6 +1134,8 @@ class NasyncWindow(Adw.ApplicationWindow):
             progress=self._thread_file_progress,
             byte_progress=self._thread_byte_progress,
             cancel_event=self._cancel_event,
+            stage=self._thread_stage,
+            server=server,
         )
 
         def work():
@@ -923,8 +1149,8 @@ class NasyncWindow(Adw.ApplicationWindow):
                         break
                 return merged
             if direction == "push":
-                return syncer.sync_pair(dry_run=dry_run)
-            return syncer.restore_pair(dry_run=dry_run)
+                return syncer.sync_pair(pair, dry_run=dry_run)
+            return syncer.restore_pair(pair, dry_run=dry_run)
 
         self._last_dry_run = dry_run
         run_async(work, on_done=self._on_transfer_done, on_error=self._on_transfer_error)
@@ -948,9 +1174,12 @@ class NasyncWindow(Adw.ApplicationWindow):
         main loop reads once the run is over. Files with SMB-illegal names are
         already counted as `unsupported`, so they aren't failures.
         """
+        text = message.strip()
+        if self._run.get("dry_run") and text[:1] in "↑↓→⚠✗" and len(self._preview) < 5000:
+            self._preview.append(text)       # the preview's own file list
+            return
         if len(self._errors) >= 200:      # a pathological run shouldn't grow unbounded
             return
-        text = message.strip()
         if text.startswith("❌"):
             self._errors.append(text.lstrip("❌ "))
         elif text.startswith("🛑"):
@@ -961,9 +1190,17 @@ class NasyncWindow(Adw.ApplicationWindow):
             self._errors.append(text.lstrip("!⚠ "))
 
     def show_error_details(self) -> None:
-        dialog = Adw.AlertDialog(heading="Transfer errors",
-                                 body=f"{len(self._errors)} item(s) did not transfer.")
-        text = Gtk.Label(label="\n".join(self._errors), xalign=0)
+        """Everything the last run said needs looking at — or, after a
+        preview, the whole list of what it would do."""
+        lines = self._errors or ["Nothing to report."]
+        if self._last_dry_run and self._preview:
+            lines = self._preview + ([""] + self._errors if self._errors else [])
+        dialog = Adw.AlertDialog(
+            heading="What the preview found" if self._last_dry_run else "Details",
+            body=(f"{len(self._preview):,} line(s)" if self._last_dry_run
+                  else f"{len(self._errors)} item(s) to look at: files that "
+                       f"didn't transfer, were skipped, or were kept."))
+        text = Gtk.Label(label="\n".join(lines[:2000]), xalign=0)
         text.set_selectable(True)
         text.set_wrap(True)
         text.add_css_class("monospace")
@@ -982,6 +1219,89 @@ class NasyncWindow(Adw.ApplicationWindow):
 
     def _thread_file_progress(self, done, total, name, verb) -> None:
         on_main(self._update_file_progress, done, total, name, verb)
+
+    def _thread_stage(self, text: str) -> None:
+        on_main(self._update_stage, text)
+
+    def _update_stage(self, text: str) -> None:
+        """Between files — connecting, reading the server, deleting."""
+        self._current_file = None
+        self._progress_log.set_label(f"{self._pair_prefix()}{text}")
+
+    def _tick(self) -> bool:
+        """Once a second while running: keep the elapsed time honest. And
+        now and then, whether background syncing is really running."""
+        if self._busy:
+            self._progress_detail.set_label(self._run_context())
+        elif time.monotonic() - self._service_checked > self.SERVICE_CHECK_SECONDS:
+            self._service_checked = time.monotonic()
+            run_async(self._service_problem, on_done=self._show_service_problem)
+        return True
+
+    #: How often to ask systemd whether the background service runs.
+    SERVICE_CHECK_SECONDS = 15.0
+
+    def _service_problem(self):
+        """``(message, button, action)`` when automatic syncing is set up but
+        won't happen, else None. Runs off the main loop: it asks systemd, and
+        a unit that can't start is diagnosed by running its program once."""
+        config = Config()
+        if not config.automation_wanted():
+            return None
+        if not config.get_background():
+            return ("Automatic syncing is paused: scheduled and live syncs won't run.",
+                    "Resume", "resume")
+        state = service.status(config)
+        if state.get("backend") != service.SYSTEMD:
+            return None
+        if not state.get("installed"):
+            return ("Automatic syncing is on, but the background service isn't "
+                    "installed, so nothing syncs while NASync is closed.",
+                    "Install", "install")
+        if state.get("active"):
+            return None
+        return ("Automatic syncing is on, but the background service isn't "
+                "running: " + (state.get("problem") or "it stopped") + ".",
+                "Start", "install")
+
+    def _show_service_problem(self, problem) -> None:
+        if not problem:
+            self._banner.set_revealed(False)
+            self._banner_action = None
+            return
+        message, button, action = problem
+        self._banner.set_title(message)
+        self._banner.set_button_label(button)
+        self._banner_action = action
+        self._banner.set_revealed(True)
+
+    def _on_banner_clicked(self, _banner) -> None:
+        action = self._banner_action
+
+        def work():
+            if action == "resume":
+                Config().set_background(True)
+            service.install()
+            return True
+
+        def done(_ok):
+            self._service_checked = 0.0          # look again on the next tick
+            self.toast("Background syncing started")
+
+        self._banner.set_revealed(False)
+        run_async(work, on_done=done,
+                  on_error=lambda e: self.toast(f"Couldn't start it: {e}"))
+
+    def _run_context(self) -> str:
+        """'Folder 2 of 3 · Pictures · on home-nas · 1:04 elapsed'."""
+        parts = []
+        if self._current_pair:
+            index, total, name = self._current_pair
+            parts.append(f"Folder {index} of {total}: '{name}'" if total > 1
+                         else f"'{name}'")
+        parts.append(f"on '{self._run.get('server', '')}'")
+        parts.append(self._elapsed())
+        return "  ·  ".join(parts)
 
     def _thread_byte_progress(self, done, total, name, verb) -> None:
         # Dropped here, on the worker thread, rather than queued and discarded
@@ -1014,17 +1334,16 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._current_pair = (index, total, name)
         self._current_file = None
         self._progress_bar.set_fraction(0.0)
-        self._progress_log.set_label(
-            f"{name}  ·  pair {index} of {total}  ·  comparing files…"
-            f"  ·  {self._elapsed()}")
+        self._progress_log.set_label(f"{self._pair_prefix()}Reading your folder…")
+        self._progress_detail.set_label(self._run_context())
+        self._mark_pair_busy(self._run.get("server"), name)
 
     def _update_file_progress(self, done, total, name, verb) -> None:
         self._current_file = (done, total, name)
         if total:
             self._progress_bar.set_fraction(self._pair_fraction(done / total))
-        counter = f"{done} of {total} files" if total else f"{done} files"
-        self._progress_log.set_label(
-            f"{self._pair_prefix()}{verb} {name}  ·  {counter}  ·  {self._elapsed()}")
+        counter = f"{done:,} of {total:,}" if total else f"{done:,}"
+        self._progress_log.set_label(f"{self._pair_prefix()}{verb} {counter}: {name}")
 
     def _update_byte_progress(self, done, total, name, verb) -> None:
         # Blend within-file progress into the overall bar so a single large
@@ -1059,35 +1378,32 @@ class NasyncWindow(Adw.ApplicationWindow):
         self._notifier.enabled = self.config.get_notifications()
         run_async(lambda: self._notifier.notify(summary, body, urgency=urgency))
 
-    def _on_transfer_done(self, result) -> None:
-        self._set_busy(False)
-        self._cancel_event = None
-        if result.get("cancelled"):
-            self._progress_title.set_label("Cancelled")
-            self._progress_detail.set_label("The transfer was stopped part-way.")
-            self._progress_bar.set_fraction(0.0)
-            self.toast("Transfer cancelled")
-            return
-
-        self._progress_bar.set_fraction(1.0)
-        unsupported = result.get("unsupported", 0)
-        # A pair can fail outright ("failed") or individual files within an
-        # otherwise fine pair can fail ("errors"); both mean data didn't land.
-        problems = result.get("failed", 0) + result.get("errors", 0)
-        self._progress_title.set_label(
-            f"Finished with {problems} error(s)" if problems else "Complete")
-
-        parts = [f"{result.get('transferred', 0)} transferred",
-                 f"{result.get('skipped', 0)} unchanged",
-                 f"{result.get('deleted', 0)} removed"]
-        if result.get("moved"):
-            parts.append(f"{result['moved']} moved")
-        if result.get("conflicts"):
-            parts.append(f"{result['conflicts']} changed on the NAS, kept as copies")
-        if result.get("foreign"):
-            parts.append(f"{result['foreign']} on the NAS left alone")
-        if unsupported:
-            parts.append(f"{unsupported} skipped (see details)")
+    @staticmethod
+    def result_parts(result: dict, direction: str, dry_run: bool) -> list:
+        """What a run did (or, previewed, would do), as short phrases."""
+        would = "would be " if dry_run else ""
+        if direction == "pull":
+            parts = [f"{result.get('transferred', 0):,} {would}restored",
+                     f"{result.get('skipped', 0):,} already up to date"]
+            if result.get("kept_local"):
+                parts.append(f"{result['kept_local']:,} kept: changed here since "
+                             f"the last backup")
+        else:
+            parts = [f"{result.get('transferred', 0):,} {would or ''}"
+                     f"{'uploaded' if dry_run else 'transferred'}",
+                     f"{result.get('skipped', 0):,} unchanged",
+                     f"{result.get('deleted', 0):,} {would}deleted"]
+            if result.get("moved"):
+                parts.append(f"{result['moved']:,} {would}moved")
+            if result.get("conflicts"):
+                parts.append(f"{result['conflicts']:,} changed on the NAS, "
+                             f"{'would be ' if dry_run else ''}kept as copies")
+            if result.get("foreign"):
+                parts.append(f"{result['foreign']:,} on the NAS left alone")
+        if result.get("unsupported"):
+            parts.append(f"{result['unsupported']:,} skipped (see details)")
+        if result.get("local_errors"):
+            parts.append(f"{result['local_errors']:,} unreadable here")
         held = [r for r in result.get("refused", []) if not r.get("dry_run")]
         would_hold = [r for r in result.get("refused", []) if r.get("dry_run")]
         if held:
@@ -1097,21 +1413,82 @@ class NasyncWindow(Adw.ApplicationWindow):
                          + ", ".join(r["pair"] for r in would_hold))
         if result.get("overlapping"):
             parts.append(f"{len(result['overlapping'])} skipped (shared folder)")
+        return parts
+
+    def _on_transfer_done(self, result) -> None:
+        run, self._run = self._run, {}
+        self._set_busy(False)
+        self._cancel_event = None
+        self._mark_pair_busy(run.get("server"), None)
+        self.refresh_pairs(run.get("server"))
+        self._log_scroll.set_visible(False)
+        self._showing_result = True
+        direction, dry_run = run.get("direction", "push"), run.get("dry_run", False)
+        noun = {("push", False): "Sync", ("push", True): "Preview",
+                ("pull", False): "Restore", ("pull", True): "Restore preview"}[
+                    (direction, dry_run)]
+        if result.get("cancelled"):
+            self._progress_title.set_label(f"{noun} cancelled")
+            self._progress_detail.set_label(
+                "Stopped part-way. Files already done stay done; nothing is "
+                "left half-written.")
+            self._progress_bar.set_fraction(0.0)
+            self.toast(f"{noun} cancelled")
+            return
+
+        self._progress_bar.set_fraction(1.0)
+        # A pair can fail outright ("failed") or individual files within an
+        # otherwise fine pair can fail ("errors"); both mean data didn't land.
+        problems = result.get("failed", 0) + result.get("errors", 0)
+        held = [r for r in result.get("refused", []) if not r.get("dry_run")]
+        if problems:
+            title = f"{noun} finished with {problems} problem(s)"
+        elif held:
+            title = f"{noun} done — part held back for you"
+        elif dry_run:
+            title = f"{noun} ready — nothing was changed"
+        else:
+            title = f"{noun} complete"
+        self._progress_title.set_label(title)
+        parts = self.result_parts(result, direction, dry_run)
         self._progress_detail.set_label("  ·  ".join(parts))
-        self._details_button.set_visible(bool(self._errors))
-        self._details_button.set_label("Show details" if not problems
-                                       else "Show errors")
-        self.toast("Sync complete" if not problems
-                   else f"Finished with {problems} error(s)")
+        self._details_button.set_visible(bool(self._errors) or dry_run)
+        self._details_button.set_label(
+            "Show list" if dry_run and not problems
+            else "Show errors" if problems else "Show details")
+        self.toast(title)
         self._notify_unattended(
-            f"Sync finished with {problems} error(s)" if problems else "Sync complete",
-            f"{self.config.get_active_server_name()}  ·  " + "  ·  ".join(parts))
+            title, f"{run.get('server', '')}  ·  " + "  ·  ".join(parts),
+            urgency="critical" if problems else "normal")
         confirmable = [r for r in held if r.get("confirmable")]
         if confirmable:
             self._confirm_mass_delete(confirmable)
 
+    def _on_transfer_error(self, exc) -> None:
+        run, self._run = self._run, {}
+        self._set_busy(False)
+        self._cancel_event = None
+        self._mark_pair_busy(run.get("server"), None)
+        self._log_scroll.set_visible(False)
+        self._showing_result = True
+        from nasync.core.activity import SyncBusy
+        from nasync.core.samba import ServerIdentityChanged
+        if isinstance(exc, ServerIdentityChanged):
+            self._offer_trust(str(exc))
+        if isinstance(exc, SyncBusy):
+            # Another process won the race; the poll will show its run.
+            self._progress_title.set_label("Another sync is running")
+            self._progress_detail.set_label("It is shown here as soon as it reports.")
+            return
+        self._progress_title.set_label("Couldn't sync" if run.get("direction") != "pull"
+                                       else "Couldn't restore")
+        self._progress_detail.set_label(str(exc))
+        self._progress_bar.set_fraction(0.0)
+        self.toast(str(exc))
+        self._notify_unattended("Sync failed", str(exc), urgency="critical")
+
     def _confirm_mass_delete(self, held: list) -> None:
-        """Ask before letting held-back mirror runs delete.
+        """Ask before letting held-back mirror runs delete or overwrite.
 
         Nothing has been deleted when this appears: the run stopped before
         touching the server. Saying so is half the point of the dialog — the
@@ -1119,22 +1496,26 @@ class NasyncWindow(Adw.ApplicationWindow):
         """
         def what(r):
             parts = []
-            if r.get("deletes"):
+            if r.get("hold_deletes", True) and r.get("deletes"):
                 parts.append(f"delete {r['deletes']:,}")
-            if r.get("overwrites"):
-                parts.append(f"overwrite {r['overwrites']:,}")
+            if r.get("hold_overwrites") or (not r.get("deletes") and r.get("overwrites")):
+                parts.append(f"replace {r['overwrites']:,}")
             return " and ".join(parts) or "change"
         lines = [f"• '{r['pair']}' would {what(r)} of {r['total']:,} file(s) "
                  f"in its server folder." for r in held]
+        deleting = any(r.get("hold_deletes", True) and r.get("deletes") for r in held)
+        replacing = any(r.get("hold_overwrites") for r in held)
+        verb = ("Delete and Replace" if deleting and replacing
+                else "Replace" if replacing else "Delete")
         dialog = Adw.AlertDialog(
-            heading="Delete or replace files on the server?",
+            heading=f"{verb} files on the server?",
             body="\n".join(lines) + "\n\nNothing has been deleted or replaced "
                  "yet, and new files were backed up. This usually means a folder "
                  "moved, a disk didn't mount, or a pair points somewhere "
                  "unexpected — or, for replaced files, that something rewrote "
-                 "them all. Dry run lists every file first.")
+                 "them all. Preview Sync lists every file first.")
         dialog.add_response("keep", "Keep Them")
-        dialog.add_response("delete", "Delete")
+        dialog.add_response("delete", verb)
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("keep")
         dialog.set_close_response("keep")
@@ -1164,6 +1545,10 @@ class NasyncWindow(Adw.ApplicationWindow):
         if status is not None and status.get("pid") == os.getpid():
             status = None
         if status is not None:
+            if self._bg_status is None:
+                for name, action in self._run_actions.items():
+                    if name not in ("pair-edit", "pair-remove"):
+                        action.set_enabled(False)
             self._show_background(status, first=self._bg_status is None)
         elif self._bg_status is not None:
             self._background_finished(self._bg_status)
@@ -1180,33 +1565,42 @@ class NasyncWindow(Adw.ApplicationWindow):
             self._log_scroll.set_visible(True)
             self._bg_cancelling = False
         if not self._bg_cancelling:
+            kind = "restore" if status.get("direction") == "pull" else "sync"
             self._progress_title.set_label(
-                "Background sync running…" if status.get("source") == "background"
-                else "Sync running elsewhere…")
+                f"Background {kind} running…" if status.get("source") == "background"
+                else f"{kind.capitalize()} running from the command line…"
+                if status.get("source") == "cli" else f"{kind.capitalize()} running elsewhere…")
         self._progress_bar.set_fraction(activity.progress_fraction(status))
         line = activity.describe(status)
         self._progress_detail.set_label(line[0].upper() + line[1:])
+        pair = f"{status['pair']}  ·  " if status.get("pair") else ""
         if status.get("files_total"):
             self._progress_log.set_label(
-                f"{status.get('verb', 'Working')} {status.get('files_done', 0)}"
-                f"/{status['files_total']} — {status.get('file', '')}")
+                f"{pair}{status.get('verb', 'Working')} {status.get('files_done', 0):,}"
+                f" of {status['files_total']:,}: {status.get('file', '')}")
         else:
-            self._progress_log.set_label(
-                f"Comparing '{status.get('pair', '')}'…" if status.get("pair")
-                else "Starting…")
+            self._progress_log.set_label(f"{pair}{status.get('stage') or 'Starting…'}")
+        server = status.get("server")
+        if server and status.get("pair"):
+            self._mark_pair_busy(server, status["pair"])
 
     def _background_finished(self, was: dict) -> None:
         """The other process is done: say what it did, then hand back control."""
         self._cancel_button.set_sensitive(False)
         self._set_actions_sensitive(bool(self.config.get_active_server_name()))
+        for name, action in self._run_actions.items():
+            action.set_enabled(True)
         self._log_scroll.set_visible(False)
         self._bg_cancelling = False
+        self._bg_status = None
+        self._mark_pair_busy(was.get("server"), None)
+        self.refresh_pairs(was.get("server"))
         last = activity.read_last(self.config.config_dir)
         if not last or abs(last.get("started", 0) - was.get("started", -1)) > 1:
-            self._progress_title.set_label("Idle")
-            self._progress_bar.set_fraction(0.0)
+            self._showing_result = False
             self.refresh_summary()
             return
+        self._showing_result = True
         outcome = last.get("result", {})
         problems = outcome.get("failed", 0) + outcome.get("errors", 0)
         who = ("Background sync" if last.get("source") == "background"
@@ -1269,15 +1663,3 @@ class NasyncWindow(Adw.ApplicationWindow):
                            f"at a copy of NASync that no longer runs")
 
         run_async(work, on_done=done)
-
-    def _on_transfer_error(self, exc) -> None:
-        self._set_busy(False)
-        self._cancel_event = None
-        from nasync.core.samba import ServerIdentityChanged
-        if isinstance(exc, ServerIdentityChanged):
-            self._offer_trust(str(exc))
-        self._progress_title.set_label("Failed")
-        self._progress_detail.set_label(str(exc))
-        self._progress_bar.set_fraction(0.0)
-        self.toast(str(exc))
-        self._notify_unattended("Sync failed", str(exc), urgency="critical")

@@ -1,4 +1,5 @@
 import threading
+import time
 
 from nasync.core import state as sync_state
 from nasync.core.activity import Activity
@@ -19,6 +20,9 @@ class Syncer:
          "foreign",       # files on the NAS NASync didn't put there, kept
          "local_errors",  # of "errors": files/folders here that couldn't be
                           # read — reported, but a retry can't fix them
+         "kept_local",    # restore: local files kept, changed since backup
+         "direction",     # "push" or "pull"
+         "dry_run",
          "refused",       # [{pair, message, deletes, total, confirmable,
                           #   fingerprint}] — held back, needing a yes
          "overlapping",   # [pair names skipped for sharing a server folder]
@@ -35,7 +39,8 @@ class Syncer:
 
     def __init__(self, reporter=None, progress=None, byte_progress=None,
                  cancel_event=None, pair_progress=None, config=None,
-                 server: str = None, source: str = "app", trigger: str = ""):
+                 server: str = None, source: str = "app", trigger: str = "",
+                 stage=None):
         self.config = config or Config()
         #: Which server this syncer targets; None means the active one. Named
         #: rather than implied, because the mode, the connection and the pairs
@@ -57,7 +62,25 @@ class Syncer:
         # unchanged and transfer no files at all.
         self._pair_progress = pair_progress or (
             lambda index, total, name, verb: None)
+        # What the run is doing between files ("Reading the server's copy…"),
+        # for the window and for the status file a background run publishes.
+        self._stage_callback = stage
+        self._last_stage = ("", 0.0)
         self._activity = None
+
+    def _stage(self, text: str) -> None:
+        """Pass a stage on, at most a few times a second for the same kind."""
+        kind = text.split("…", 1)[0]
+        now = time.monotonic()
+        if kind == self._last_stage[0] and now - self._last_stage[1] < 0.25:
+            return
+        self._last_stage = (kind, now)
+        if self._stage_callback is not None:
+            self._stage_callback(text)
+        if self._activity is not None:
+            # A new stage is not a file count: drop the last one's, so the
+            # app doesn't show "Uploading 40/40" while it deletes.
+            self._activity.update(stage=text, files_done=0, files_total=0, file="")
 
     def _file_progress(self, done, total, name, verb) -> None:
         if self._progress is not None:
@@ -100,6 +123,7 @@ class Syncer:
             progress=self._file_progress,
             byte_progress=self._byte_progress,
             cancel_event=self._cancel,
+            stage=self._stage,
         )
         return client, pairs
 
@@ -168,7 +192,8 @@ class Syncer:
         # below lets the pull side omit it without special-casing.
         totals = {"transferred": 0, "skipped": 0, "deleted": 0, "moved": 0,
                   "deleted_dirs": 0, "errors": 0, "unsupported": 0,
-                  "conflicts": 0, "foreign": 0, "local_errors": 0}
+                  "conflicts": 0, "foreign": 0, "local_errors": 0,
+                  "kept_local": 0}
         if not dry_run and not pair_name:
             # Records of destinations no pair points at any more would be
             # trusted wrongly if one were pointed back there later.
@@ -183,6 +208,7 @@ class Syncer:
             # that index comes back empty or errors — so the one command
             # someone runs to ask "what will this delete before I let it?"
             # could not answer.
+            self._stage(f"Connecting to '{server_name}'…")
             client.connect()
             if client.identity and not self.config.get_server_config(
                     self.server).get("identity"):
@@ -290,7 +316,8 @@ class Syncer:
                     record.close()
             result = {"ok": ok, "failed": failed, "cancelled": cancelled,
                       "refused": refused, "overlapping": overlapping,
-                      "pairs": outcome, **totals}
+                      "pairs": outcome, "direction": direction,
+                      "dry_run": dry_run, **totals}
         finally:
             client.release()
             self._activity = None

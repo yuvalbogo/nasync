@@ -37,6 +37,9 @@ except ImportError:          # not POSIX: run without cross-process exclusion
 LOCK_NAME = "sync.lock"
 STATUS_NAME = "sync-status.json"
 LAST_NAME = "last-sync.json"
+#: Each pair's last outcome, kept across runs — a run of one pair must not
+#: wipe what is known about the others.
+PAIRS_NAME = "pair-status.json"
 CANCEL_NAME = "sync-cancel"
 
 #: How often progress is written to disk. The app polls once a second; writing
@@ -123,6 +126,26 @@ def read_status(config_dir):
     return status
 
 
+def read_pairs(config_dir, server: str) -> dict:
+    """``{pair: {"when", "outcome", "direction"}}`` for one server."""
+    data = _read_json(_path(config_dir, PAIRS_NAME)) or {}
+    return data.get(server or "", {}) if isinstance(data, dict) else {}
+
+
+def when(stamp: float, now: float = None) -> str:
+    """"today at 19:25", "yesterday at 08:10", "Mon 3 Nov at 19:25"."""
+    then = time.localtime(stamp)
+    today = time.localtime(now if now is not None else time.time())
+    clock = time.strftime("%H:%M", then)
+    days = (time.mktime(today[:3] + (0, 0, 0, 0, 0, -1))
+            - time.mktime(then[:3] + (0, 0, 0, 0, 0, -1))) / 86400
+    if round(days) == 0:
+        return f"today at {clock}"
+    if round(days) == 1:
+        return f"yesterday at {clock}"
+    return f"{time.strftime('%a %-d %b', then)} at {clock}"
+
+
 def read_last(config_dir):
     """What the most recent finished run did, or None."""
     return _read_json(_path(config_dir, LAST_NAME))
@@ -155,13 +178,34 @@ def describe(status: dict) -> str:
     return " ".join(parts)
 
 
-def describe_last(last: dict) -> str:
+def headline(last: dict) -> str:
+    """The most recent run's outcome in a few words: "Synced today at 19:36"."""
+    outcome = last.get("result", {})
+    restore = last.get("direction") == "pull"
+    kind = "restore" if restore else "sync"
+    stamp = when(last.get("finished", 0))
+    problems = outcome.get("failed", 0) + outcome.get("errors", 0)
+    if outcome.get("cancelled"):
+        return f"Last {kind} {stamp} was cancelled"
+    if problems:
+        return f"Last {kind} {stamp} had {problems} problem(s)"
+    if outcome.get("refused"):
+        return f"Last sync {stamp}: part held back"
+    return f"{'Restored' if restore else 'Synced'} {stamp}"
+
+
+def describe_last(last: dict, with_time: bool = True) -> str:
     """One line about the most recent finished run, for a person."""
-    when = time.strftime("%a %d %b %H:%M", time.localtime(last.get("finished", 0)))
+    finished = when(last.get("finished", 0))
     who = SOURCES.get(last.get("source"), "another process")
     outcome = last.get("result", {})
-    parts = [f"{outcome.get('transferred', 0)} transferred",
-             f"{outcome.get('deleted', 0)} removed"]
+    if last.get("direction") == "pull":
+        parts = [f"{outcome.get('transferred', 0)} restored"]
+        if outcome.get("kept_local"):
+            parts.append(f"{outcome['kept_local']} kept (changed here since the backup)")
+    else:
+        parts = [f"{outcome.get('transferred', 0)} transferred",
+                 f"{outcome.get('deleted', 0)} removed"]
     if outcome.get("moved"):
         parts.append(f"{outcome['moved']} moved")
     if outcome.get("conflicts"):
@@ -174,7 +218,10 @@ def describe_last(last: dict) -> str:
     if outcome.get("refused"):
         parts.append("held back: " + ", ".join(outcome["refused"]))
     trigger = f" ({last['trigger']})" if last.get("trigger") else ""
-    return f"Last sync {when}, by {who}{trigger} — " + " · ".join(parts)
+    if not with_time:
+        return f"By {who}{trigger}: " + " · ".join(parts)
+    kind = "restore" if last.get("direction") == "pull" else "sync"
+    return f"Last {kind} {finished}, by {who}{trigger} — " + " · ".join(parts)
 
 
 def progress_fraction(status: dict) -> float:
@@ -261,13 +308,25 @@ class Activity:
         """Record what the run did, for whoever looks after it is over."""
         summary = {key: result.get(key, 0) for key in
                    ("ok", "failed", "transferred", "skipped", "deleted",
-                    "moved", "errors", "conflicts", "foreign")}
+                    "moved", "errors", "conflicts", "foreign", "kept_local",
+                    "local_errors")}
         summary["cancelled"] = bool(result.get("cancelled"))
         summary["refused"] = [r.get("pair") for r in result.get("refused", [])]
+        finished = time.time()
+        direction = result.get("direction") or self._status.get("direction", "push")
         _write_json(_path(self.config_dir, LAST_NAME),
                     {**{k: self._status[k] for k in
                         ("source", "trigger", "server", "started")},
-                     "finished": time.time(), "result": summary})
+                     "direction": direction, "finished": finished,
+                     "result": summary})
+        if result.get("pairs") and not result.get("cancelled"):
+            path = _path(self.config_dir, PAIRS_NAME)
+            known = _read_json(path) or {}
+            mine = known.setdefault(self._status.get("server") or "", {})
+            for pair, outcome in result["pairs"].items():
+                mine[pair] = {"when": finished, "outcome": outcome,
+                              "direction": direction}
+            _write_json(path, known)
 
     # -- status ----------------------------------------------------------- #
     def update(self, force: bool = False, **fields) -> None:
