@@ -188,7 +188,7 @@ class SAMBAClient:
     def __init__(self, ip: str, username: str, password: str, share: str,
                  port: int = 445, reporter=None, progress=None,
                  byte_progress=None, cancel_event=None, encrypt: bool = False,
-                 identity: str = None):
+                 identity: str = None, stage=None):
         self.ip = ip
         self.username = username
         self.password = password
@@ -201,6 +201,9 @@ class SAMBAClient:
         self._progress = progress or (lambda done, total, name, verb: None)
         self._byte_progress = byte_progress or (
             lambda done, total, name, verb: None)
+        #: ``stage(text)``: what a run is doing between files, for a person —
+        #: reading the server can take minutes and moves no file counter.
+        self._stage = stage or (lambda text: None)
         self._cancel = cancel_event
         self._connected = False
         #: The server's identity (its SMB server GUID) as first seen, or None
@@ -1146,6 +1149,9 @@ class SAMBAClient:
             raise
         return digest.hexdigest()
 
+    def _scan_stage(self, _directories: int, files: int) -> None:
+        self._stage(f"Reading the server's copy… {files:,} file(s) so far")
+
     def _recover_set_aside(self, base: str, remote_map: dict, remote_mtimes: dict,
                            record: dict) -> None:
         """Put back files an interrupted swap or case rename left aside.
@@ -1569,12 +1575,15 @@ class SAMBAClient:
             return self._unc(base, rel.replace("/", "\\"))
 
         # --- 1. index both sides, and recall what was last put there ---
+        self._stage("Reading your folder…")
         scan = self._scan_local(local_dir)
         local_map = scan.files
         remote_dirs = set()
         remote_mtimes = {}
+        self._stage("Reading the server's copy…")
         remote_map = self._remote_file_map(base, dirs=remote_dirs,
-                                           mtimes=remote_mtimes)
+                                           mtimes=remote_mtimes,
+                                           on_scan=self._scan_stage)
         record = state.load() if state is not None else None
         bootstrap = state is None or not state.initialised
         first_mirror = bootstrap or not state.mirrored
@@ -1599,6 +1608,8 @@ class SAMBAClient:
                 return None              # unreadable: treat as changed
 
         # --- 2. decide, and refuse before touching anything ---
+        self._stage(f"Comparing {len(local_map):,} local and "
+                    f"{len(remote_map):,} server file(s)…")
         plan = self.plan_push(local_map, remote_map, remote_mtimes, remote_dirs,
                               mirror, record=record, bootstrap=bootstrap,
                               local_hash=local_hash, remote_hash=remote_hash,
@@ -1753,8 +1764,9 @@ class SAMBAClient:
             self._ensure_remote_dir(self._unc(base, parent.replace("/", "\\")))
 
         moved = 0
-        for old, new in moves:
+        for index, (old, new) in enumerate(moves, start=1):
             self._check_cancelled()
+            self._progress(index, len(moves), new.rsplit("/", 1)[-1], "Moving")
             try:
                 smbclient.rename(unc(old), unc(new), **self._opts)
                 moved += 1
@@ -1830,8 +1842,9 @@ class SAMBAClient:
 
         # --- 8. mirror deletes ---
         deleted = 0
-        for rel in delete:
+        for index, rel in enumerate(delete, start=1):
             self._check_cancelled()
+            self._progress(index, len(delete), rel.rsplit("/", 1)[-1], "Deleting")
             try:
                 smbclient.remove(unc(rel), **self._opts)
                 deleted += 1
@@ -1848,6 +1861,8 @@ class SAMBAClient:
         # --- 9. and the directories left empty — including ones an earlier
         # run (or an older version) left behind ---
         removed_dirs = 0
+        if stale:
+            self._stage(f"Removing {len(stale):,} empty folder(s)…")
         for rel in stale:
             self._check_cancelled()
             try:
@@ -1902,8 +1917,11 @@ class SAMBAClient:
         base = self._remote(remote_dir)
 
         remote_mtimes = {}
+        self._stage("Reading the server's copy…")
         remote_map = self._remote_file_map(base, mtimes=remote_mtimes,
-                                           must_exist=True)
+                                           must_exist=True,
+                                           on_scan=self._scan_stage)
+        self._stage(f"Comparing {len(remote_map):,} server file(s) with yours…")
         record = state.load() if state is not None else {}
         # Where each file is read from: itself, or — for a file an interrupted
         # sync left only under its hidden aside name — that name. Restore

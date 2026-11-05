@@ -146,7 +146,7 @@ def test_summary_counts_per_file_errors_not_just_failed_pairs(window):
     window._on_transfer_done({"ok": 1, "failed": 0, "errors": 1, "transferred": 3,
                               "skipped": 2, "deleted": 1, "unsupported": 0})
 
-    assert window._progress_title.get_label() == "Finished with 1 error(s)"
+    assert window._progress_title.get_label() == "Sync finished with 1 problem(s)"
     assert window._details_button.get_visible()
 
 
@@ -156,7 +156,7 @@ def test_summary_reports_unsupported_names(window):
     window._on_transfer_done({"ok": 1, "failed": 0, "errors": 0, "transferred": 1,
                               "skipped": 0, "deleted": 0, "unsupported": 4})
 
-    assert window._progress_title.get_label() == "Complete"
+    assert window._progress_title.get_label() == "Sync complete"
     assert "4 skipped (see details)" in window._progress_detail.get_label()
     assert not window._details_button.get_visible()
 
@@ -603,8 +603,8 @@ def test_the_bar_measures_the_current_pair_not_the_whole_run(window):
 
     window._update_pair_progress(1, 4, "Documents", "Syncing")
     assert window._progress_bar.get_fraction() == pytest.approx(0.0)
-    assert "pair 1 of 4" in window._progress_log.get_label()
-    assert "comparing files" in window._progress_log.get_label()
+    assert "Folder 1 of 4" in window._progress_detail.get_label()
+    assert "Reading your folder" in window._progress_log.get_label()
 
     # Half of this pair's files is half a bar, not an eighth of one.
     window._update_file_progress(1, 2, "a.jpg", "Uploading")
@@ -618,7 +618,7 @@ def test_the_bar_measures_the_current_pair_not_the_whole_run(window):
     # through the run we are.
     window._update_pair_progress(2, 4, "Photos", "Syncing")
     assert window._progress_bar.get_fraction() == pytest.approx(0.0)
-    assert "pair 2 of 4" in window._progress_log.get_label()
+    assert "Folder 2 of 4: 'Photos'" in window._progress_detail.get_label()
 
     window._update_file_progress(2, 2, "b.jpg", "Uploading")
     assert window._progress_bar.get_fraction() == pytest.approx(1.0)
@@ -875,3 +875,87 @@ def test_one_server_keeps_the_app_title_in_the_header(window):
     # one — the Server/Settings bar below it is what's visible instead.
     assert window._header.get_title_widget() is window._window_title
     assert window._switcher_bar.get_visible()
+
+
+# --------------------------------------------------------------------------- #
+# 0.22.0 — what the window says, and per-folder actions
+# --------------------------------------------------------------------------- #
+@needs_gtk
+def test_a_preview_says_nothing_was_changed(window):
+    """A dry run was reported as "Complete · 5 transferred"."""
+    window._run = {"direction": "push", "dry_run": True, "server": "s"}
+    window._preview = ["↑ a.txt", "✗ b.txt (removed locally)"]
+    window._on_transfer_done({"ok": 1, "failed": 0, "errors": 0, "transferred": 5,
+                              "skipped": 2, "deleted": 1})
+    assert window._progress_title.get_label() == "Preview ready — nothing was changed"
+    detail = window._progress_detail.get_label()
+    assert "5 would be uploaded" in detail and "1 would be deleted" in detail
+    assert window._details_button.get_visible()
+
+
+@needs_gtk
+def test_a_restore_reports_what_it_kept(window):
+    window._run = {"direction": "pull", "dry_run": False, "server": "s"}
+    window._on_transfer_done({"ok": 1, "failed": 0, "errors": 0, "transferred": 4,
+                              "skipped": 9, "kept_local": 2})
+    assert window._progress_title.get_label() == "Restore complete"
+    detail = window._progress_detail.get_label()
+    assert "4 restored" in detail and "2 kept: changed here" in detail
+    assert "removed" not in detail
+
+
+@needs_gtk
+def test_a_finished_run_leaves_no_in_progress_line_behind(window):
+    """'comparing files…' stayed on screen after the run had ended."""
+    window._run = {"direction": "push", "dry_run": False, "server": "s"}
+    window._update_stage("Reading the server's copy…")
+    window._on_transfer_done({"ok": 1, "failed": 0, "errors": 0, "transferred": 1})
+    assert not window._log_scroll.get_visible()
+
+
+@needs_gtk
+def test_restore_confirmation_no_longer_threatens_local_work(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(Adw.AlertDialog, "present",
+                        lambda self, parent: shown.append(self))
+    window.confirm_restore(server="s", pair="Pictures")
+    body = shown[0].get_body()
+    assert "will be lost" not in body and "kept" in body
+    assert shown[0].get_default_response() == "preview"
+
+
+@needs_gtk
+def test_each_folder_can_be_synced_previewed_and_restored_alone(window, monkeypatch):
+    """The CLI's --pair had no counterpart in the app."""
+    started = []
+    monkeypatch.setattr(window, "start_transfer",
+                        lambda direction, dry_run, **kw: started.append(
+                            (direction, dry_run, kw.get("server"), kw.get("pair"))))
+    from gi.repository import GLib
+    target = GLib.Variant("(ss)", ("nas", "Pictures"))
+    window.activate_action("win.pair-sync", target)
+    window.activate_action("win.pair-preview", target)
+    window.activate_action("win.pair-preview-restore", target)
+    assert started == [("push", False, "nas", "Pictures"),
+                       ("push", True, "nas", "Pictures"),
+                       ("pull", True, "nas", "Pictures")]
+
+
+@needs_gtk
+def test_idle_title_says_how_the_last_run_went(window):
+    import json
+    import time as _time
+    window.config.add_or_update_server("nas", "10.0.0.5", "u", "p", "share", 445)
+    window.config.set_active_server("nas")
+    os.makedirs(os.path.join(window.config.config_dir, "x"), exist_ok=True)
+    window.config.add_pair(os.path.join(window.config.config_dir, "x"), "x", "x")
+    with open(os.path.join(window.config.config_dir, "last-sync.json"), "w") as f:
+        json.dump({"source": "background", "trigger": "scheduled 19:25",
+                   "server": "nas", "started": _time.time() - 60,
+                   "finished": _time.time(), "direction": "push",
+                   "result": {"transferred": 3, "deleted": 0, "errors": 2}}, f)
+    window._showing_result = False
+    window.refresh_summary()
+    assert window._progress_title.get_label().startswith("Last sync today at")
+    assert "had 2 problem(s)" in window._progress_title.get_label()
+    assert "Automatic syncing is off" in window._progress_detail.get_label()

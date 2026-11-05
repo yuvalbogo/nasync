@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.0] - 2026-11-05
+
+The desktop app says what is happening, folder by folder.
+
+### Added
+- **Sync, preview or restore a single folder** from its row's menu (⋯), as
+  `--pair` always allowed on the command line. Restore can be previewed too.
+- **Each folder shows its own state**: "Synced 19:36", "Held back", "Problem",
+  or a spinner while it syncs — including runs by the background service.
+- **What a run is doing between files** is shown, for the app's runs and the
+  background service's alike: connecting, reading your folder, reading the
+  server's copy (with a running count — this can take minutes), comparing,
+  deleting, removing empty folders.
+- **A banner when automatic syncing is set up but won't happen** — paused, or
+  the background service not installed or not running — with the button that
+  fixes it.
+- At rest, the window says how the last run went ("Synced today at 19:36"),
+  who ran it, and when the next automatic sync is due.
+
+### Fixed
+- **"Starting…" stayed on screen for the whole of a sync.**
+- **The progress line kept saying "comparing files…" after a run had ended.**
+- **A dry run was reported as "Complete · 5 transferred"** though it transferred
+  nothing. It now says "nothing was changed", counts what *would* happen, and
+  "Show list" lists every file.
+- **The restore dialog warned that unsynced local changes would be lost** —
+  untrue since 0.21.0, which keeps them. It now says what restore does and
+  offers a preview.
+- A restore was recorded and shown as a "sync", and the files it kept because
+  they changed locally weren't mentioned.
+- The held-back confirmation said "Delete" when what was held was overwrites.
+
 ## [0.21.2] - 2026-11-05
 
 ### Fixed
