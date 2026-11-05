@@ -128,4 +128,4 @@ N8  FIXED 0.21.0 — flake8 pin works on Python 3.15; flake8 is clean.
     the checkout; a launcher that can't start says why in a notification.
 Data-safety audits: 1st (15 findings, 0.21.0), 2nd (14, 0.21.1), 3rd (13,
 0.22.1) — every finding is a lab test that passes.
-Tests: `make check-all` = lint + 402 unit + 83 lab + 15 e2e, all passing.
+Tests: `make check-all` = lint + 402 unit + 83 lab + 18 e2e, all passing.
