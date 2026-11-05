@@ -22,8 +22,13 @@ def test_install_and_uninstall():
     assert os.path.isfile(icon_file), written
 
     content = open(desktop_file).read()
-    assert "Exec=" in content and " gui" in content         # opens the desktop app
-    assert os.path.isabs(content.split("Exec=")[1].split()[0])  # absolute path
+    # Exec is the wrapper, which runs the app — or says why it can't.
+    script = content.split("Exec=")[1].split()[0]
+    assert os.path.isabs(script) and script == str(desktop.wrapper())
+    wrapper = open(script).read()
+    assert '"$NASYNC" gui' in wrapper                       # opens the desktop app
+    assert os.path.isabs(desktop.entry_exec(wrapper))       # absolute path
+    assert os.access(script, os.X_OK)
     assert "Terminal=false" in content                      # not a terminal window
     assert "StartupNotify=true" in content
     # Icon name, entry name and app_id must agree or GNOME shows a generic icon.
@@ -33,7 +38,8 @@ def test_install_and_uninstall():
     removed = desktop.uninstall()
     assert not os.path.exists(desktop_file)
     assert not os.path.exists(icon_file)
-    assert len(removed) == 2
+    assert not os.path.exists(script)
+    assert len(removed) == 3
     print("✅ test_install_and_uninstall passed")
 
 
@@ -105,3 +111,31 @@ def test_a_program_that_is_gone_or_will_not_start_is_named():
                          "named 'nasync'\" >&2\nexit 1\n")
         os.chmod(broken, stat.S_IRWXU)
         assert "No module named" in exec_problem(broken)
+
+
+def test_a_broken_program_behind_the_wrapper_is_still_found(monkeypatch, tmp_path):
+    """The launcher runs the wrapper, so checking the launcher has to look at
+    the program inside it — or a moved checkout reads as fine."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("NASYNC_EXEC", "/no/such/venv/bin/nasync")
+    from nasync.system import launcher as desktop
+    monkeypatch.setattr(desktop.os, "access", lambda path, mode: True)
+    desktop.install(gui=True)
+    assert "/no/such/venv/bin/nasync" in desktop.wrapper().read_text()
+    assert "no longer exists" in desktop.problem()
+    desktop.wrapper().unlink()
+    assert "nasync-gui" in desktop.problem()
+
+
+def test_a_stable_install_names_its_own_path(monkeypatch, tmp_path):
+    """`make install-user` points everything at .../nasync/current, which the
+    next install keeps valid — not at the versioned folder it resolves to."""
+    stable = tmp_path / "current" / "bin" / "nasync"
+    stable.parent.mkdir(parents=True)
+    stable.write_text("#!/bin/sh\n")
+    stable.chmod(0o755)
+    monkeypatch.setenv("NASYNC_EXEC", str(stable))
+    from nasync.system.launcher import _nasync_exec
+    assert _nasync_exec() == str(stable)
+    monkeypatch.setenv("NASYNC_EXEC", "relative/nasync")
+    assert _nasync_exec() != "relative/nasync"

@@ -1,10 +1,11 @@
-.PHONY: help install install-dev test lab clean format lint
+.PHONY: help install install-dev install-user test lab clean format lint
 
 help:
 	@echo "NASync - Development Commands"
 	@echo ""
 	@echo "  make install       Install the package"
 	@echo "  make install-dev   Install with dev dependencies"
+	@echo "  make install-user  Install for everyday use, apart from this checkout (REF=main)"
 	@echo "  make test          Run tests"
 	@echo "  make lab           Run the data-safety lab (real Samba, needs podman)"
 	@echo "  make clean         Clean build artifacts"
@@ -16,6 +17,12 @@ install:
 
 install-dev:
 	pip install -e ".[dev]"
+
+# The app launcher and background service run this install, not the checkout,
+# so switching branches here never changes what syncs tonight.
+REF ?= main
+install-user:
+	sh scripts/install-user $(REF)
 
 test:
 	python -m pytest tests/ -v

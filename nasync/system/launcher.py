@@ -31,13 +31,49 @@ Version=1.0
 Name=NASync
 GenericName=SAMBA NAS Sync
 Comment=Sync your NAS with class
-Exec={exec} gui
+Exec={exec}
 Icon={app_id}
 Terminal=false
 Categories=Network;FileTransfer;
 Keywords=samba;smb;cifs;nas;sync;backup;
 StartupNotify=true
 StartupWMClass={app_id}
+"""
+
+
+# What the launcher actually runs. Clicking an entry whose program can't start
+# shows *nothing* — no window, no error — which is how a moved checkout and a
+# Python upgrade both looked on a real machine: "the icon does nothing". This
+# runs the app, and if it can't, says so in a notification, with the reason
+# and the fix, and keeps the output in a log.
+_WRAPPER = """#!/bin/sh
+# NASync's app launcher: opens the app, or says why it can't.
+# Written by `nasync install-desktop`; the next install rewrites it.
+NASYNC={exec_quoted}
+LOG="${{XDG_STATE_HOME:-$HOME/.local/state}}/nasync/gui.log"
+mkdir -p "$(dirname "$LOG")"
+started=$(date +%s)
+"$NASYNC" gui "$@" >"$LOG" 2>&1
+status=$?
+[ "$status" -eq 0 ] && exit 0
+if [ ! -x "$NASYNC" ]; then
+    reason="$NASYNC is gone: the copy of NASync it pointed at was moved or deleted"
+else
+    reason=$(grep -v -i -e 'warning' -e '^[[:space:]]*$' "$LOG" | tail -n 1)
+    [ -n "$reason" ] || reason="it exited with status $status"
+fi
+title="NASync couldn't start"
+[ $(( $(date +%s) - started )) -gt 15 ] && title="NASync closed unexpectedly"
+body="$reason. Reinstall it with 'make install-user' in the NASync folder. Details: $LOG"
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send -a NASync -i {app_id} "$title" "$body"
+else
+    gdbus call --session --dest org.freedesktop.Notifications \\
+        --object-path /org/freedesktop/Notifications \\
+        --method org.freedesktop.Notifications.Notify \\
+        NASync 0 {app_id} "$title" "$body" '[]' '{{}}' 0 >/dev/null 2>&1
+fi
+exit "$status"
 """
 
 
@@ -91,6 +127,11 @@ def _nasync_exec() -> str:
     probed for GTK. Baking in the other would point the launcher at a build
     that may have no desktop app at all.
     """
+    pinned = os.environ.get("NASYNC_EXEC", "")
+    if os.path.isabs(pinned) and os.access(pinned, os.X_OK):
+        # A stable install (`make install-user`) names its own path, which
+        # survives the next install — the resolved one is replaced by it.
+        return pinned
     candidate = sys.argv[0]
     if candidate and os.path.basename(candidate) == "nasync" and os.path.isfile(candidate):
         return os.path.realpath(candidate)
@@ -126,11 +167,16 @@ def desktop_entry() -> Path:
     return _data_home() / "applications" / f"{APP_ID}.desktop"
 
 
+def wrapper() -> Path:
+    """The script the launcher runs (see `_WRAPPER`)."""
+    return _data_home() / "nasync" / "nasync-gui"
+
+
 def entry_exec(text: str):
     """The program an installed .desktop file or systemd unit would run."""
     import shlex
     for line in text.splitlines():
-        for key in ("Exec=", "ExecStart="):
+        for key in ("Exec=", "ExecStart=", "NASYNC="):
             if line.startswith(key):
                 try:
                     parts = shlex.split(line[len(key):])
@@ -146,7 +192,13 @@ def problem():
     if not entry.is_file():
         return None
     try:
-        return exec_problem(entry_exec(entry.read_text()))
+        program = entry_exec(entry.read_text())
+        if program and os.path.basename(program) == "nasync-gui":
+            # Our wrapper: what matters is the program inside it.
+            if not os.path.isfile(program):
+                return f"it points at {program}, which no longer exists"
+            program = entry_exec(Path(program).read_text())
+        return exec_problem(program)
     except OSError:
         return None
 
@@ -225,9 +277,17 @@ def install(gui: bool = None) -> list:
     shutil.copyfile(src, icon_dest)
     written.append(icon_dest)
 
+    import shlex
+    script = wrapper()
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(_WRAPPER.format(exec_quoted=shlex.quote(_nasync_exec()),
+                                      app_id=APP_ID))
+    os.chmod(script, 0o755)
+    written.append(script)
+
     desktop_dest = apps_dir / f"{APP_ID}.desktop"
     desktop_dest.write_text(_DESKTOP_ENTRY.format(
-        exec=_nasync_exec(),
+        exec=_desktop_quote(str(script)),
         app_id=APP_ID,
     ))
     os.chmod(desktop_dest, 0o644)
@@ -239,6 +299,15 @@ def install(gui: bool = None) -> list:
 
     _refresh_caches(apps_dir, data_home)
     return written
+
+
+def _desktop_quote(path: str) -> str:
+    """A path as a Desktop Entry Exec= argument (quoted only if it must be)."""
+    if not any(c in path for c in ' \t\n"\'\\><~|&;$*?#()`'):
+        return path
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"') \
+        .replace("`", "\\`").replace("$", "\\$")
+    return f'"{escaped}"'
 
 
 def _legacy_paths(data_home: Path) -> list:
@@ -268,6 +337,7 @@ def uninstall() -> list:
     for path in [
         data_home / "applications" / f"{APP_ID}.desktop",
         data_home / "icons" / "hicolor" / "scalable" / "apps" / f"{APP_ID}.svg",
+        wrapper(),
     ] + _legacy_paths(data_home):
         if path.exists():
             path.unlink()

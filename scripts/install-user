@@ -1,0 +1,58 @@
+#!/bin/sh
+# Install NASync for everyday use, apart from the checkout it comes from.
+#
+#   make install-user            # the tested branch, main
+#   make install-user REF=dev    # or any branch, tag or commit
+#
+# Builds a virtualenv under ~/.local/share/nasync from a clean export of REF,
+# then points the app launcher, the background service and ~/.local/bin/nasync
+# at it. The checkout can switch branches, move, or lose its .venv without the
+# app or the nightly sync noticing — the app launcher pointed into a checkout
+# broke twice in one day (the folder moved; Fedora upgraded Python).
+#
+# The previous install is kept, for a rollback: `ls ~/.local/share/nasync`.
+set -eu
+
+REF=${1:-main}
+REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+COMMIT=$(git -C "$REPO" rev-parse --short "$REF^{commit}")
+DATA=${XDG_DATA_HOME:-$HOME/.local/share}/nasync
+TARGET=$DATA/venv-$COMMIT
+CURRENT=$DATA/current
+
+echo "Installing NASync $REF ($COMMIT) into $TARGET"
+SRC=$(mktemp -d)
+trap 'rm -rf "$SRC"' EXIT
+git -C "$REPO" archive "$COMMIT" | tar -x -C "$SRC"
+
+# GTK and libadwaita come from the distribution, hence system site-packages.
+rm -rf "$TARGET"
+mkdir -p "$DATA"
+python3 -m venv --system-site-packages "$TARGET"
+"$TARGET/bin/pip" install --quiet --disable-pip-version-check "$SRC"
+"$TARGET/bin/nasync" --version >/dev/null      # it starts, before switching to it
+
+ln -sfn "$TARGET" "$CURRENT.new"
+mv -T "$CURRENT.new" "$CURRENT"
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$CURRENT/bin/nasync" "$HOME/.local/bin/nasync"
+
+# Through the stable path, so the next install doesn't break what this writes.
+export NASYNC_EXEC="$CURRENT/bin/nasync"
+"$NASYNC_EXEC" install-desktop >/dev/null
+echo "App launcher: updated"
+if systemctl --user is-enabled --quiet nasync-auto.service 2>/dev/null; then
+    "$NASYNC_EXEC" service install >/dev/null       # rewrites, never restarts
+    echo "Background service: updated; it uses this install from its next start"
+    echo "  (now: systemctl --user restart nasync-auto — not during a sync)"
+fi
+
+# Keep this install and the one before it, and any a process still runs from.
+for old in $(ls -1dt "$DATA"/venv-* 2>/dev/null | tail -n +3); do
+    if grep -qs "$old/" /proc/[0-9]*/cmdline; then
+        echo "Kept $old: still in use"
+    else
+        rm -rf "$old"
+    fi
+done
+echo "Done: $("$CURRENT/bin/nasync" --version)"
