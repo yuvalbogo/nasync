@@ -959,3 +959,54 @@ def test_idle_title_says_how_the_last_run_went(window):
     assert window._progress_title.get_label().startswith("Last sync today at")
     assert "had 2 problem(s)" in window._progress_title.get_label()
     assert "Automatic syncing is off" in window._progress_detail.get_label()
+
+
+@needs_gtk
+def test_moving_a_servers_root_asks_first_when_it_has_folders(window, monkeypatch):
+    """The CLI always asked; the app saved a root change silently."""
+    shown = []
+    monkeypatch.setattr(Adw.AlertDialog, "present", lambda self, parent: shown.append(self))
+    window.config.add_or_update_server("nas", "10.0.0.5", "u", "p", "share", 445,
+                                       root="backups")
+    os.makedirs(os.path.join(window.config.config_dir, "d"), exist_ok=True)
+    window.config.add_pair(os.path.join(window.config.config_dir, "d"), "docs", "docs",
+                           server="nas")
+    values = {"name": "nas", "orig_name": "nas", "ip": "10.0.0.5", "username": "u",
+              "password": "p", "share": "share", "port": 445, "root": "elsewhere"}
+    window._on_server_saved(values)
+    assert shown and "Move 1 folder" in shown[0].get_heading()
+    assert "share:/backups/docs" in shown[0].get_body()
+    assert window.config.get_root("nas") == "backups", "saved before the answer"
+    shown[0].emit("response", "move")
+    assert window.config.get_root("nas") == "elsewhere"
+
+
+@needs_gtk
+def test_pointing_a_mirrored_pair_at_another_folder_asks_first(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(Adw.AlertDialog, "present", lambda self, parent: shown.append(self))
+    window.config.add_or_update_server("nas", "10.0.0.5", "u", "p", "share", 445)
+    old = os.path.join(window.config.config_dir, "Programming")
+    new = os.path.join(window.config.config_dir, "Projects")
+    os.makedirs(old)
+    os.makedirs(new)
+    window.config.add_pair(old, "Programming", "Programming", server="nas")
+    window._on_pair_saved({"orig_name": "Programming", "local": new,
+                           "dest": "Programming", "name": "Programming"}, "nas")
+    assert shown and "another folder" in shown[0].get_heading()
+    assert window.config.get_pair("Programming", "nas")["local"] == old
+    shown[0].emit("response", "change")
+    assert window.config.get_pair("Programming", "nas")["local"] == new
+
+
+@needs_gtk
+def test_a_server_that_cannot_be_saved_says_why(window, monkeypatch):
+    toasts = []
+    monkeypatch.setattr(window, "toast", toasts.append)
+
+    def locked(*a, **k):
+        raise RuntimeError("the keyring is locked")
+    monkeypatch.setattr(window.config, "save_server", locked)
+    window._save_server({"name": "nas", "ip": "1", "username": "u", "password": "p",
+                         "share": "s", "port": 445})
+    assert toasts == ["Couldn't save 'nas': the keyring is locked"]

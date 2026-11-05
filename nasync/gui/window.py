@@ -519,10 +519,11 @@ class NasyncWindow(Adw.ApplicationWindow):
 
         note_group = Adw.PreferencesGroup(title="Restore")
         note = Adw.ActionRow(
-            title="Restore never deletes local files",
-            subtitle="Restoring from the server adds and overwrites local files "
-                     "only. Local files the server doesn't have are left alone, "
-                     "in either mode.",
+            title="Restore never deletes or overwrites your work",
+            subtitle="Restoring copies back files that are missing here and "
+                     "updates ones older than the backup. Files you changed "
+                     "since their last backup are kept, and local files the "
+                     "server doesn't have are left alone, in either mode.",
         )
         note.set_subtitle_lines(0)
         note.set_activatable(False)
@@ -931,15 +932,69 @@ class NasyncWindow(Adw.ApplicationWindow):
         self.open_server_dialog(self.config.get_server(name))
 
     def _on_server_saved(self, values) -> None:
+        """Save — but ask first if the change moves where the folders land.
+
+        Pairs are stored relative to the sync root, so changing the root (or
+        the share) moves every one of them; in mirror mode the next sync then
+        deletes whatever was already at the new place. The command line always
+        asked about this; the app saved it silently.
+        """
+        from nasync.core.config import join_remote, normalize_remote
+        old_name = values.get("orig_name") or values["name"]
+        old = self.config.get_server(old_name, with_password=False) or {}
+        pairs = self.config.get_pairs(old_name) if old else []
+        try:
+            new_root = normalize_remote(values.get("root") or "")
+        except ValueError:
+            new_root = values.get("root") or ""
+        old_root = self.config.get_root(old_name) if old else ""
+        new_share = values.get("share", "")
+        moved = old and pairs and (
+            new_root != old_root
+            or (old.get("share") or "").casefold() != new_share.casefold())
+        if not moved:
+            self._save_server(values)
+            return
+        lines = [f"• {old.get('share', '')}:/{self.config.resolve_remote(p['server'], old_name)}"
+                 f"  →  {new_share}:/{join_remote(new_root, p['server'])}"
+                 for p in pairs[:5]]
+        if len(pairs) > 5:
+            lines.append(f"… and {len(pairs) - 5} more")
+        mirror = self.config.get_sync_mode(old_name) == "mirror"
+        dialog = Adw.AlertDialog(
+            heading=f"Move {len(pairs)} folder(s) on the server?",
+            body="Folders are stored inside the sync root, so this moves where "
+                 "each one goes:\n\n" + "\n".join(lines)
+                 + ("\n\nThis server is on mirror mode: the next sync deletes "
+                    "anything already at the new places that isn't on this "
+                    "machine. Nothing at the old places is touched." if mirror else
+                    "\n\nNothing at the old places is touched or copied."))
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("move", "Move Them")
+        dialog.set_response_appearance(
+            "move", Adw.ResponseAppearance.DESTRUCTIVE if mirror
+            else Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", lambda _d, response: (
+            self._save_server(values) if response == "move" else None))
+        dialog.present(self)
+
+    def _save_server(self, values) -> None:
         # save_server carries the pairs across a rename; remove-then-add, which
         # this used to do, would have deleted them with the old name.
-        self.config.save_server(
-            values["name"], values["ip"], values["username"],
-            values["password"], values["share"], values["port"],
-            orig_name=values.get("orig_name"),
-            encrypt=values.get("encrypt", False),
-            root=values.get("root"),
-        )
+        try:
+            self.config.save_server(
+                values["name"], values["ip"], values["username"],
+                values["password"], values["share"], values["port"],
+                orig_name=values.get("orig_name"),
+                encrypt=values.get("encrypt", False),
+                root=values.get("root"),
+            )
+        except Exception as exc:                  # noqa: BLE001 — shown, not lost
+            # Nothing was changed (see `_mutator`): say why, don't vanish.
+            self.toast(f"Couldn't save '{values['name']}': {exc}")
+            return
         self.config.set_active_server(values["name"])
         self.refresh_servers()
         self.refresh_summary()
@@ -957,7 +1012,11 @@ class NasyncWindow(Adw.ApplicationWindow):
     def _on_remove_server_response(self, _dialog, response, name) -> None:
         if response != "remove":
             return
-        self.config.remove_server(name)
+        try:
+            self.config.remove_server(name)
+        except Exception as exc:                  # noqa: BLE001 — shown, not lost
+            self.toast(f"Couldn't remove '{name}': {exc}")
+            return
         self.refresh_servers()
         self.refresh_summary()
         self.toast(f"Removed server '{name}'")
@@ -982,6 +1041,37 @@ class NasyncWindow(Adw.ApplicationWindow):
                               server_name=server_name)
 
     def _on_pair_saved(self, values, server_name) -> None:
+        """Save a pair — asking first if it now reads from another folder.
+
+        On a mirror server the next sync makes the server copy match the new
+        folder, so whatever the old one had and the new one doesn't goes:
+        exactly what happened when ~/Programming became ~/Projects.
+        """
+        original = values.get("orig_name")
+        before = self.config.get_pair(original, server_name) if original else None
+        new_local = os.path.abspath(os.path.expanduser(values["local"]))
+        if (before and os.path.abspath(before["local"]) != new_local
+                and self.config.get_sync_mode(server_name) == "mirror"):
+            dialog = Adw.AlertDialog(
+                heading=f"Back up another folder as '{original}'?",
+                body=f"'{original}' will read from {_home_relative(new_local)} "
+                     f"instead of {_home_relative(before['local'])}. This server "
+                     f"mirrors, so the next sync makes its copy match the new "
+                     f"folder: files the old one had and the new one doesn't "
+                     f"are deleted there (50 or more wait for a yes). Preview "
+                     f"Sync shows exactly what would change.")
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("change", "Change Folder")
+            dialog.set_response_appearance("change", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+            dialog.connect("response", lambda _d, response: (
+                self._save_pair(values, server_name) if response == "change" else None))
+            dialog.present(self)
+            return
+        self._save_pair(values, server_name)
+
+    def _save_pair(self, values, server_name) -> None:
         original = values.get("orig_name")
         try:
             if original:
