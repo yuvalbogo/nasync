@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Render the real NASync window, state by state, to PNG files.
+
+    scripts/gui-shots OUTDIR [STEP ...]
+
+Steps: idle settings sync preview pairsync restorepreview restore
+appsettings serverinfo pairdialog moveroot (default: all of them).
+
+Everything runs in a throwaway test profile against a throwaway Samba
+container (podman or docker) with a few folders of junk files — never the
+real config, NAS or keyring. Needs a desktop session: the window opens on
+screen while it works.
+"""
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+STEPS = ["idle", "settings", "sync", "preview", "pairsync", "restorepreview",
+         "restore", "appsettings", "serverinfo", "pairdialog", "moveroot"]
+
+
+def start_samba():
+    engine = next((e for e in ("podman", "docker") if shutil.which(e)), None)
+    if engine is None:
+        sys.exit("needs podman or docker")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    name = f"nasync-shots-{uuid.uuid4().hex[:8]}"
+    subprocess.run([engine, "run", "-d", "--rm", "--name", name, "-p", f"{port}:445",
+                    "docker.io/dperson/samba", "-u", "shots;shots",
+                    "-s", "backup;/share;yes;no;no;shots", "-p"],
+                   check=True, capture_output=True)
+    subprocess.run([engine, "exec", name, "sh", "-c",
+                    "mkdir -p /share/shots && chmod -R 777 /share"], capture_output=True)
+    time.sleep(4)
+    return engine, name, port
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    out = os.path.abspath(sys.argv[1])
+    steps = sys.argv[2:] or STEPS
+    os.makedirs(out, exist_ok=True)
+    profile = tempfile.mkdtemp(prefix="nasync-shots-")
+    # The test profile; XDG_DATA_HOME stays, or the desktop's icon theme is lost.
+    os.environ["XDG_CONFIG_HOME"] = os.path.join(profile, "config")
+    os.environ["XDG_STATE_HOME"] = os.path.join(profile, "state")
+    engine, container, port = start_samba()
+    try:
+        render(out, steps, profile, port)
+    finally:
+        subprocess.run([engine, "rm", "-f", container], capture_output=True)
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+def render(out, steps, profile, port):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    gi.require_version("Graphene", "1.0")
+    from gi.repository import Adw, GLib, Graphene, Gtk
+
+    from nasync.system import launcher, service, vault
+    launcher.repair = lambda: False          # never touch the real launcher
+    service.repair = lambda: False
+    vault.backend = lambda: ""               # never touch the real keyring
+    from nasync.core.config import Config
+    from nasync.gui.window import NasyncWindow
+
+    config = Config()
+    config.set_notifications(False)
+    config.add_or_update_server("home-nas", "127.0.0.1", "shots", "shots", "backup",
+                                port, root="shots")
+    config.set_active_server("home-nas")
+    for name in ("Documents", "Pictures", "Music"):
+        folder = os.path.join(profile, "src", name)
+        os.makedirs(folder)
+        for i in range(40):
+            with open(os.path.join(folder, f"file{i:03d}.bin"), "wb") as handle:
+                handle.write(os.urandom(1_000_000))
+        config.add_pair(folder, name, name, server="home-nas")
+    config.set_automation(scheduled_sync=True, scheduled_time="19:25", server="home-nas")
+
+    def shot(win, name):
+        width, height = win.get_width(), win.get_height()
+        snapshot = Gtk.Snapshot.new()
+        Gtk.WidgetPaintable.new(win).snapshot(snapshot, width, height)
+        node = snapshot.to_node()
+        if node is None:
+            return
+        texture = win.get_renderer().render_texture(
+            node, Graphene.Rect().init(0, 0, width, height))
+        path = os.path.join(out, f"{name}.png")
+        texture.save_to_png(path)
+        print(path, flush=True)
+
+    def tab(win, name):
+        win._sub_stacks["home-nas"].set_visible_child_name(name)
+
+    def plan_for(win):
+        target = GLib.Variant("(ss)", ("home-nas", "Music"))
+        plans = {
+            "idle": [(1500, lambda: shot(win, "idle"))],
+            "settings": [(300, lambda: tab(win, "settings")),
+                         (800, lambda: shot(win, "settings")),
+                         (300, lambda: tab(win, "server"))],
+            "sync": [(300, lambda: win.start_transfer("push", False))]
+            + [(400, lambda i=i: shot(win, f"sync-running-{i}")) for i in range(4)]
+            + [(8000, lambda: shot(win, "sync-done"))],
+            "preview": [(300, lambda: win.start_transfer("push", True)),
+                        (5000, lambda: shot(win, "preview-done"))],
+            "pairsync": [(300, lambda: win.activate_action("win.pair-sync", target)),
+                         (400, lambda: shot(win, "pair-sync-running")),
+                         (6000, lambda: shot(win, "pair-sync-done"))],
+            "restorepreview": [(300, lambda: win.start_transfer("pull", True)),
+                               (5000, lambda: shot(win, "restore-preview-done"))],
+            "restore": [(300, lambda: win.confirm_restore()),
+                        (800, lambda: shot(win, "restore-question"))],
+            "appsettings": [(300, lambda: win.open_settings()),
+                            (900, lambda: shot(win, "app-settings"))],
+            "serverinfo": [(300, lambda: win.open_server_info()),
+                           (3500, lambda: shot(win, "server-info"))],
+            "pairdialog": [(300, lambda: win.open_pair_dialog(
+                win.config.get_pair("Pictures", "home-nas"), server_name="home-nas")),
+                (900, lambda: shot(win, "pair-dialog"))],
+            "moveroot": [(300, lambda: win._on_server_saved(
+                {**win.config.get_server("home-nas"), "orig_name": "home-nas",
+                 "root": "elsewhere"})),
+                (800, lambda: shot(win, "move-root-question"))],
+        }
+        return plans
+
+    def close_dialog(win):
+        """Each step starts from a window with no dialog open."""
+        dialog = win.get_visible_dialog() if hasattr(win, "get_visible_dialog") else None
+        if dialog is not None:
+            dialog.force_close()
+
+    app = Adw.Application(application_id="io.github.YuvalBogo.NASync.Shots")
+
+    def activate(application):
+        win = NasyncWindow(application)
+        win.set_default_size(720, 820)
+        win.present()
+        plans = plan_for(win)
+        elapsed = 0
+        for step in steps:
+            for delay, action in plans[step]:
+                elapsed += delay
+                GLib.timeout_add(elapsed, lambda a=action: (a(), False)[1])
+            elapsed += 400
+            GLib.timeout_add(elapsed, lambda: (close_dialog(win), False)[1])
+        GLib.timeout_add(elapsed + 800, lambda: (application.quit(), False)[1])
+
+    app.connect("activate", activate)
+    app.run([])
+
+
+if __name__ == "__main__":
+    main()

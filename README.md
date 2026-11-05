@@ -1087,6 +1087,14 @@ make e2e                    # needs podman; window tests need a desktop session
 make check-all              # lint, unit tests, the lab and the e2e suite
 ```
 
+To *look* at the window in each state — idle, syncing, a finished preview,
+the restore question, the settings — without touching your own setup:
+
+```bash
+scripts/gui-shots ~/nasync-shots          # every state, as PNG files
+scripts/gui-shots ~/nasync-shots sync restore
+```
+
 ## How the code is laid out
 
 ```
