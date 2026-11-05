@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.3] - 2026-11-05
+
+### Fixed
+- **Changing a server's sync root (or share) in the app moved every folder
+  silently** — in mirror mode, deleting whatever was already at the new place
+  on the next sync. The app now asks first and lists the moves, as the
+  command line always did.
+- **Pointing a folder pair at another local folder on a mirror server** now
+  says what the next sync will do to the server copy, and asks.
+- A server that couldn't be saved or removed (a locked keyring) failed
+  silently; the app now says why, and nothing is half-changed.
+- The Settings tab's restore note described pre-0.21 behaviour.
+
 ## [0.22.2] - 2026-11-05
 
 ### Added
