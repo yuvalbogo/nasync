@@ -24,7 +24,13 @@ contents. Pointing a pair at a new destination starts a new record; the old
 one is pruned. Until a pair has finished one complete sync with a record
 (``initialised``), it is in **bootstrap**: everything on the server was put
 there by an older version or by hand, and the rules fall back to the ones
-that applied before the record existed.
+that applied before the record existed. ``mirrored`` marks its first
+complete mirror run, which is held back if it would delete a lot.
+
+The key includes the server entry's *name*, so renaming the entry moves its
+records with it (`rename_server`) — until 0.21.1 a rename sent every pair
+back to bootstrap, where conflict copies and other people's files are fair
+game for a mirror.
 """
 
 import hashlib
@@ -93,16 +99,19 @@ class SyncState:
         self.server = server
         self.destination = destination
         self.read_only = read_only
-        path = os.path.join(str(config_dir), DB_NAME)
-        os.makedirs(str(config_dir), exist_ok=True)
-        self._db = sqlite3.connect(path, timeout=30)
-        self._db.executescript(_SCHEMA)
+        self._db = _open(config_dir)
         self._last_commit = time.monotonic()
 
     # -- reading ---------------------------------------------------------- #
     @property
     def initialised(self) -> bool:
         row = self._db.execute("SELECT initialised FROM pairs WHERE key = ?",
+                               (self.key,)).fetchone()
+        return bool(row and row[0])
+
+    @property
+    def mirrored(self) -> bool:
+        row = self._db.execute("SELECT mirrored FROM pairs WHERE key = ?",
                                (self.key,)).fetchone()
         return bool(row and row[0])
 
@@ -151,6 +160,14 @@ class SyncState:
             (self.key, self.server, self.destination, time.time()))
         self._db.commit()
 
+    def mark_mirrored(self) -> None:
+        """The pair has finished a mirror run with nothing held back."""
+        if self.read_only:
+            return
+        self._db.execute("UPDATE pairs SET mirrored = ? WHERE key = ?",
+                         (time.time(), self.key))
+        self._db.commit()
+
     def register(self) -> None:
         """Note this pair's destination, so pruning knows it is current."""
         if self.read_only:
@@ -173,6 +190,50 @@ class SyncState:
             self._db.close()
 
 
+def _open(config_dir) -> sqlite3.Connection:
+    """The database, created or brought up to date."""
+    os.makedirs(str(config_dir), exist_ok=True)
+    db = sqlite3.connect(os.path.join(str(config_dir), DB_NAME), timeout=30)
+    db.executescript(_SCHEMA)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(pairs)")}
+    if "mirrored" not in columns:                     # added in 0.21.1
+        db.execute("ALTER TABLE pairs ADD COLUMN mirrored REAL")
+        db.commit()
+    return db
+
+
+def rename_server(config_dir, old: str, new: str, share: str) -> None:
+    """Carry a server entry's records over to its new name.
+
+    Only for the same share: an edit that also points the entry at another
+    share is a different set of files, and its records would mislead.
+    """
+    path = os.path.join(str(config_dir), DB_NAME)
+    if old == new or not os.path.exists(path):
+        return
+    db = _open(config_dir)
+    try:
+        for key, destination in db.execute(
+                "SELECT key, destination FROM pairs WHERE server = ?", (old,)).fetchall():
+            if key != pair_key(old, share, destination):
+                continue                       # another share's record
+            moved = pair_key(new, share, destination)
+            db.execute("DELETE FROM entries WHERE key = ?", (moved,))
+            db.execute("DELETE FROM pairs WHERE key = ?", (moved,))
+            db.execute("UPDATE entries SET key = ? WHERE key = ?", (moved, key))
+            db.execute("UPDATE pairs SET key = ?, server = ? WHERE key = ?",
+                       (moved, new, key))
+        db.commit()
+    finally:
+        db.close()
+
+
+def forget_server(config_dir, server: str) -> None:
+    """Drop every record of a removed server entry, so one added later under
+    the same name starts afresh instead of trusting another NAS's history."""
+    prune(config_dir, server, set())
+
+
 def prune(config_dir, server: str, current_keys: set) -> None:
     """Drop records for destinations no pair of `server` points at any more.
 
@@ -183,9 +244,8 @@ def prune(config_dir, server: str, current_keys: set) -> None:
     path = os.path.join(str(config_dir), DB_NAME)
     if not os.path.exists(path):
         return
-    db = sqlite3.connect(path, timeout=30)
+    db = _open(config_dir)
     try:
-        db.executescript(_SCHEMA)
         stale = [key for (key,) in db.execute(
             "SELECT key FROM pairs WHERE server = ?", (server,))
             if key not in current_keys]

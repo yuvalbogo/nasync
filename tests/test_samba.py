@@ -5,8 +5,10 @@ import tempfile
 import threading
 from pathlib import Path
 
+import pytest
+
 import nasync.core.samba as samba_module
-from nasync.core.samba import SAMBAClient, SyncCancelled
+from nasync.core.samba import SAMBAClient, SyncCancelled, _settle_case_twins
 from smbprotocol.exceptions import (
     AccessDenied, BadNetworkName, LogonFailure, SMBException, SMBOSError,
 )
@@ -1133,7 +1135,7 @@ def test_a_case_rename_the_server_refuses_goes_through_a_temporary_name():
     fake.rename = rename
     client = _client(fake)
     client._rename_case("\\\\s\\img.jpg", "\\\\s\\IMG.jpg")
-    temp = f"\\\\s\\img.jpg.nasync-case-{os.getpid()}"
+    temp = f"\\\\s\\.img.jpg.nasync-case-{os.getpid()}"
     assert fake.renamed == [("\\\\s\\img.jpg", temp), (temp, "\\\\s\\IMG.jpg")]
 
 
@@ -1177,9 +1179,23 @@ def test_a_file_changed_on_the_nas_is_set_aside_not_overwritten():
 
 
 def test_a_dst_hour_on_the_nas_is_not_a_change():
-    plan = _rplan({"f": (4, 5_000.0)}, {"f": 4}, {"f": 5_000.0 + 3600},
-                  {"f": _rec(4, 5_000.0)})
+    """A FAT volume shows *every* time an hour off after a DST change."""
+    names = [f"f{i}" for i in range(12)]
+    plan = _rplan({n: (4, 5_000.0) for n in names}, {n: 4 for n in names},
+                  {n: 5_000.0 + 3600 for n in names},
+                  {n: _rec(4, 5_000.0) for n in names})
     assert plan["conflicts"] == [] and plan["upload"] == [], plan
+
+
+def test_one_file_an_hour_off_is_checked_not_assumed_to_be_dst():
+    """A same-size NAS edit made an hour after the upload was read as a DST
+    shift and then overwritten (second audit, F6)."""
+    edited = _rplan({"f": (4, 5_000.0)}, {"f": 4}, {"f": 5_000.0 + 3600},
+                    {"f": _rec(4, 5_000.0, sha="abc")}, remote_hashes={"f": "xyz"})
+    assert edited["conflicts"] == ["f"], edited
+    same = _rplan({"f": (4, 5_000.0)}, {"f": 4}, {"f": 5_000.0 + 3600},
+                  {"f": _rec(4, 5_000.0, sha="abc")}, remote_hashes={"f": "abc"})
+    assert same["conflicts"] == [] and same["upload"] == [], same
 
 
 def test_a_same_size_nas_change_is_checked_by_checksum():
@@ -1256,8 +1272,33 @@ def test_names_differing_only_in_case_are_reported_not_collided():
         Path(tmpdir, "README.txt").write_text("a")
         Path(tmpdir, "readme.txt").write_text("b")
         scan = client._scan_local(tmpdir)
-    assert list(scan.files) == ["README.txt"]
-    assert scan.unsupported[0][0] == "readme.txt" and "letter case" in scan.unsupported[0][1]
+    assert scan.twins == [["README.txt", "readme.txt"]]
+    files = dict(scan.files)
+    dropped, shielded = _settle_case_twins(files, scan.twins)
+    assert list(files) == ["README.txt"] and shielded == set()
+    assert dropped[0][0] == "readme.txt" and "letter case" in dropped[0][1]
+
+
+def test_the_case_twin_kept_is_the_one_the_server_has():
+    """A new "Notes.txt" beside "notes.txt" replaced the backup of a file
+    that was still there (second audit, F3)."""
+    files = {"Notes.txt": ("/x/N", 3, 1.0), "notes.txt": ("/x/n", 9, 1.0)}
+    dropped, shielded = _settle_case_twins(files, [["Notes.txt", "notes.txt"]],
+                                           remote_map={"notes.txt": 9})
+    assert list(files) == ["notes.txt"] and dropped[0][0] == "Notes.txt"
+    assert shielded == set()
+
+
+def test_a_server_holding_both_twins_keeps_both_backups():
+    """Both twins on the NAS (made there by something else), both restored:
+    the push leaves one out, and must not delete its backup (F8)."""
+    files = {"Report.txt": ("/x/R", 5, 1.0), "report.txt": ("/x/r", 9, 1.0)}
+    remote = {"Report.txt": 5, "report.txt": 9}
+    _, shielded = _settle_case_twins(files, [["Report.txt", "report.txt"]], remote)
+    plan = _rplan({"Report.txt": (5, 1.0)}, remote, {"Report.txt": 1.0, "report.txt": 1.0},
+                  {"Report.txt": _rec(5, 1.0), "report.txt": _rec(9, 1.0)},
+                  shielded=shielded)
+    assert plan["delete"] == [], plan
 
 
 def test_a_symlinked_folder_is_listed_with_its_reason():
@@ -1277,3 +1318,61 @@ def test_conflict_copy_names_never_collide():
     assert _conflict_name("docs/report.docx", "2026-11-05 1925", taken) == \
         "docs/report (NAS copy 2026-11-05 1925 2).docx"
     assert _conflict_name("README", "d", set()) == "README (NAS copy d)"
+
+
+# --------------------------------------------------------------------------- #
+# 0.21.1 — the second data-safety audit
+# --------------------------------------------------------------------------- #
+def test_update_mode_records_leftovers_so_mirror_removes_them_later():
+    """Update mode made a pair 'initialised' and left pre-record leftovers
+    unrecorded, so they were someone else's for ever (F7)."""
+    plan = _rplan({"keep": (1, 1.0)}, {"keep": 1, "old.txt": 5},
+                  {"keep": 1.0, "old.txt": 3.0}, {}, mirror=False, bootstrap=True)
+    assert plan["delete"] == [] and plan["learn"]["old.txt"].remote_size == 5
+    later = _rplan({"keep": (1, 1.0)}, {"keep": 1, "old.txt": 5},
+                   {"keep": 1.0, "old.txt": 3.0},
+                   {"keep": _rec(1, 1.0), "old.txt": plan["learn"]["old.txt"]})
+    assert later["delete"] == ["old.txt"] and later["foreign"] == []
+
+
+def test_conflict_copies_are_never_deleted_even_without_a_record():
+    copy = "doc (NAS copy 2026-11-05 1925).txt"
+    plan = _rplan({}, {copy: 5, "gone.txt": 3}, {copy: 1.0, "gone.txt": 1.0}, {},
+                  bootstrap=True)
+    assert plan["delete"] == ["gone.txt"], plan
+
+
+def test_a_yes_to_held_deletes_survives_the_run_that_asked():
+    """The fingerprint covered overwrites the held run went on to do, so a
+    yes was refused the first time, every time (F4)."""
+    deletes = [f"f{i}" for i in range(60)]
+    asked = {"delete": deletes, "overwrites": ["edit.txt"]}
+    with pytest.raises(MirrorRefused) as refusal:
+        SAMBAClient.check_mirror(asked, 1, 61)
+    assert refusal.value.hold_deletes and not refusal.value.hold_overwrites
+    after = {"delete": deletes, "overwrites": []}
+    SAMBAClient.check_mirror(after, 1, 61,
+                             allow_mass_delete=refusal.value.fingerprint)
+    grown = {"delete": deletes + ["f60"], "overwrites": []}
+    with pytest.raises(MirrorRefused):
+        SAMBAClient.check_mirror(grown, 1, 62,
+                                 allow_mass_delete=refusal.value.fingerprint)
+
+
+def test_a_long_name_gets_a_short_temp_name_that_is_still_ours():
+    from nasync.core.samba import _OLD_MARK, _TEMP_MARK, _is_own_temp, \
+        _temp_name, _temp_original
+    short = _temp_name("a.txt", _TEMP_MARK)
+    assert short == f".a.txt{_TEMP_MARK}{os.getpid()}"
+    long_name = "x" * 240 + ".pdf"
+    temp = _temp_name(long_name, _OLD_MARK)
+    assert len(temp.encode()) <= 255 and _is_own_temp(temp)
+    assert _temp_original(temp, _OLD_MARK, ["other", long_name]) == long_name
+    assert _temp_original(_temp_name("b.doc", _OLD_MARK), _OLD_MARK) == "b.doc"
+
+
+def test_a_conflict_copy_of_a_long_name_still_fits():
+    from nasync.core.samba import _conflict_name, _is_conflict_copy
+    name = "ש" * 118 + ".txt"
+    copy = _conflict_name(name, "2026-11-05 1925", set())
+    assert len(copy.encode()) <= 255 and _is_conflict_copy(copy)

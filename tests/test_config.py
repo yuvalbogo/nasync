@@ -903,3 +903,51 @@ def test_switching_the_schedule_on_waits_for_its_slot(configured_config):
     early = datetime.datetime.combine(datetime.date.today(), datetime.time(8, 0))
     assert not scheduled_run_is_due(settings["scheduled_time"],
                                     settings["last_scheduled_run"], now=early)
+
+
+def test_samba_identities_are_only_names():
+    from nasync.core.config import identity_is_weak
+    assert identity_is_weak("72617370-6265-7272-7970-690000000000")   # "raspberrypi"
+    assert identity_is_weak("00000000-0000-0000-0000-000000000000")
+    assert not identity_is_weak("3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+
+
+def test_two_nases_with_the_same_default_name_are_not_one_storage(tmp_path, monkeypatch):
+    """Samba's identity is its host name: a second "raspberrypi" was refused
+    as the same storage as the first (second audit, G4)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from nasync.system import vault
+    monkeypatch.setattr(vault, "backend", lambda: "")
+    from nasync.core.config import Config
+    config = Config()
+    weak = "72617370-6265-7272-7970-690000000000"
+    config.add_or_update_server("home", "10.0.0.5", "u", "p", "share", 445)
+    config.add_or_update_server("offsite", "10.0.0.6", "u", "p", "share", 445)
+    config.add_or_update_server("alias", "10.0.0.5", "u", "p", "share", 445)
+    for name in ("home", "offsite", "alias"):
+        config.set_server_identity(name, weak)
+    assert not config.same_storage("home", "offsite")
+    assert config.same_storage("home", "alias")
+    config.set_server_identity("alias", "6f746865-7262-6f78-0000-000000000000")
+    assert not config.same_storage("home", "alias")      # another name: another box
+
+
+def test_renaming_a_server_carries_its_identity_and_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from nasync.system import vault
+    monkeypatch.setattr(vault, "backend", lambda: "")
+    from nasync.core import state
+    from nasync.core.config import Config
+    config = Config()
+    config.add_or_update_server("nas", "10.0.0.5", "u", "p", "share", 445)
+    config.set_server_identity("nas", "3f2504e0-4f89-11d3-9a0c-0305e82c3301")
+    record = state.SyncState(config.config_dir, "nas", "share", "docs")
+    record.register()
+    record.mark_initialised()
+    record.close()
+    config.save_server("home-nas", "10.0.0.5", "u", "p", "share", 445, orig_name="nas")
+    assert config.get_server_config("home-nas")["identity"] == \
+        "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+    moved = state.SyncState(config.config_dir, "home-nas", "share", "docs")
+    assert moved.initialised
+    moved.close()

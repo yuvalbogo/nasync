@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.1] - 2026-11-05
+
+The second data-safety audit, run against 0.21.0's new mechanisms. Every
+finding below was proven against a real Samba server first; each is now a lab
+test (`tests/lab/test_second_audit.py`).
+
+### Fixed — could lose data
+- **One unreadable item kept a pair in bootstrap for ever** (a root-owned
+  `lost+found`, one `chmod 000` file), so mirror kept deleting files other
+  people put on the NAS. Problems reading *local* files no longer block it.
+- **Renaming a server entry discarded its record**, so the next mirror run
+  deleted conflict copies and other people's files. The record, identity and
+  settings now move with the name, and conflict copies are never deleted.
+- **A new "Notes.txt" beside "notes.txt" replaced the backup of notes.txt.**
+  The name the NAS already has is the one kept.
+- **Case twins created on the NAS lost one backup** after a restore and a sync.
+- **A NAS edit made exactly an hour after the upload was overwritten**, read as
+  a FAT volume's DST shift. That is now assumed only when most files moved.
+- **Ctrl+C in the middle of replacing a file left it only under a hidden
+  name**, which restore skipped and the next sync deleted. The old copy is put
+  back on any interruption, and recovered by the next sync or restore if not.
+- **A killed restore's half-written file was uploaded**, on every run.
+
+### Fixed — wrong or stuck
+- **A confirmed "yes" was refused again** whenever the held run had also done
+  ordinary edits. A yes now covers the held deletions and overwrites separately.
+- **File names over ~235 bytes could be neither backed up nor restored** (the
+  temporary name was too long). Long names get a short temporary name.
+- **Update mode never learned pre-record leftovers**, so switching to mirror
+  never removed files deleted long ago. They are recorded, and the first
+  mirror run asks before deleting 50 or more.
+- **Live sync retried a failing folder back to back**, without a pause.
+- **Two NASes with the same default host name were "the same storage"**:
+  Samba's identity is only its name, so the second NAS of a 3-2-1 setup was
+  refused. Addresses decide in that case.
+- Removing a server entry now removes its record too.
+
 ## [0.21.0] - 2026-11-05
 
 A data-safety release. Everything below was found by a new test lab that runs

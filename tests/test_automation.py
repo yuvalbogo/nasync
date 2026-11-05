@@ -1152,6 +1152,9 @@ def test_one_failing_pair_keeps_its_changes_owed(monkeypatch):
         automator.note_changes("second")
         automator.catch_up()
         assert automator._owed_pairs() == ["second"]
+        # …and waits before trying it again, instead of syncing it back to
+        # back for ever (second audit, G1).
+        assert not automator.catch_up_due()
 
 
 def test_a_folder_that_cannot_be_watched_falls_back_to_a_timer(monkeypatch,

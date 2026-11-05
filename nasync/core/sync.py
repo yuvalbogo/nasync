@@ -17,6 +17,8 @@ class Syncer:
          "transferred", "skipped", "deleted", "moved", "errors", "unsupported",
          "conflicts",     # files changed on the NAS, set aside as copies
          "foreign",       # files on the NAS NASync didn't put there, kept
+         "local_errors",  # of "errors": files/folders here that couldn't be
+                          # read — reported, but a retry can't fix them
          "refused",       # [{pair, message, deletes, total, confirmable,
                           #   fingerprint}] — held back, needing a yes
          "overlapping",   # [pair names skipped for sharing a server folder]
@@ -166,7 +168,7 @@ class Syncer:
         # below lets the pull side omit it without special-casing.
         totals = {"transferred": 0, "skipped": 0, "deleted": 0, "moved": 0,
                   "deleted_dirs": 0, "errors": 0, "unsupported": 0,
-                  "conflicts": 0, "foreign": 0}
+                  "conflicts": 0, "foreign": 0, "local_errors": 0}
         if not dry_run and not pair_name:
             # Records of destinations no pair points at any more would be
             # trusted wrongly if one were pointed back there later.
@@ -238,13 +240,19 @@ class Syncer:
                         **({"unattended": unattended} if direction == "push" else {}),
                     )
                     held = stats.get("held")
-                    if (direction == "push" and not dry_run and not stats.get("errors")
-                            and not (held and held.get("deletes"))):
+                    # Server-side failures only: an unreadable local file
+                    # can't be fixed by retrying, and used to keep a pair in
+                    # bootstrap — deleting other people's files — for ever.
+                    server_errors = stats.get("errors", 0) - stats.get("local_errors", 0)
+                    if (direction == "push" and not dry_run and not server_errors
+                            and not (held and held.get("hold_deletes", True))):
                         # From now on a server file without a record was put
                         # there by someone else, and is never deleted. Not
                         # while deletions are held back: until someone answers,
                         # the files in question must still count as NASync's.
                         record.mark_initialised()
+                        if mirror:
+                            record.mark_mirrored()
                     for key in totals:
                         totals[key] += stats.get(key, 0)
                     if stats.get("refused"):
@@ -256,9 +264,10 @@ class Syncer:
                         outcome[pair["name"]] = "held"
                         self._report(f"⚠️  {pair['name']} done, part held back")
                     else:
-                        outcome[pair["name"]] = ("failed" if stats.get("errors")
-                                                 else "ok")
-                        self._report(f"✅ {pair['name']} done")
+                        outcome[pair["name"]] = "failed" if server_errors else "ok"
+                        self._report(f"✅ {pair['name']} done"
+                                     + (" — some files here couldn't be read"
+                                        if stats.get("local_errors") else ""))
                     ok += 1
                 except MirrorRefused as e:
                     self._report(f"🛑 {pair['name']} held back: {e}")

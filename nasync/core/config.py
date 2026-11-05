@@ -2,6 +2,7 @@ import functools
 import json
 import os
 import shutil
+import socket
 from pathlib import Path
 import appdirs
 
@@ -128,6 +129,33 @@ def _mutator(method):
         finally:
             self._mutating -= 1
     return wrapper
+
+
+def identity_is_weak(identity: str) -> bool:
+    """True when a server's identity is only its name, not a unique id.
+
+    Windows gives each server a random GUID. Samba sends its NetBIOS name
+    padded with zeros ("raspberrypi\\0\\0…"), so every Samba box left at
+    the same default host name looks like the same machine.
+    """
+    import uuid
+    try:
+        raw = uuid.UUID(str(identity)).bytes
+    except ValueError:
+        return True
+    text = raw.rstrip(b"\0")
+    return not text or (len(text) < len(raw) and all(32 < b < 127 for b in text))
+
+
+@functools.lru_cache(maxsize=64)
+def _addresses(host: str) -> frozenset:
+    """Every address a host name stands for ("localhost" is 127.0.0.1)."""
+    host = (host or "").strip().casefold()
+    try:
+        found = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except (OSError, UnicodeError):
+        found = set()
+    return frozenset(found | {host})
 
 
 def destinations_overlap(first: str, second: str) -> bool:
@@ -706,6 +734,16 @@ class Config:
             previous = self.get_server(orig_name, with_password=False) or {}
             settings = {key: previous[key] for key in SERVER_SETTINGS
                         if key in previous}
+            old_entry = self._server_entry(orig_name)
+            if old_entry.get("identity"):
+                settings["identity"] = old_entry["identity"]
+            if (old_entry.get("share") or "").casefold() == (share or "").casefold():
+                # The record of what was uploaded is filed under the entry's
+                # name; without this a rename sent every pair back to
+                # bootstrap, where a mirror deletes conflict copies.
+                from nasync.core import state
+                state.rename_server(self.config_dir, orig_name, name,
+                                    old_entry.get("share") or "")
 
             self.remove_server(orig_name)
             self.add_or_update_server(name, ip, username, password, share, port,
@@ -723,6 +761,8 @@ class Config:
 
     @_mutator
     def remove_server(self, name: str):
+        from nasync.core import state
+        state.forget_server(self.config_dir, name)
         self.data["servers"] = [s for s in self.data["servers"] if s["name"] != name]
         creds = self._read_creds()
         creds.pop(name, None)
@@ -1149,7 +1189,13 @@ class Config:
         One NAS is easily added twice — its LAN address and a VPN name, say —
         and pairs on the two entries can then overlap without either entry
         knowing. The NAS's identity (learned on first contact) settles it once
-        both entries have one; until then, the same address does.
+        both entries have one; until then, the same address and port do.
+
+        Samba's identity is only its host name (see `identity_is_weak`), and
+        two NASes left at a default like "raspberrypi" share it. A name can
+        prove two servers *different*, not the same, so for those the address
+        decides too — until 0.21.1 the second NAS of a 3-2-1 setup was refused
+        as "the same storage" as the first.
         """
         if first == second:
             return True
@@ -1159,8 +1205,13 @@ class Config:
         if (a.get("share") or "").casefold() != (b.get("share") or "").casefold():
             return False
         if a.get("identity") and b.get("identity"):
-            return a["identity"] == b["identity"]
-        return (a.get("ip") or "").casefold() == (b.get("ip") or "").casefold()
+            if a["identity"] != b["identity"]:
+                return False
+            if not identity_is_weak(a["identity"]):
+                return True
+        if int(a.get("port") or 445) != int(b.get("port") or 445):
+            return False
+        return bool(_addresses(a.get("ip")) & _addresses(b.get("ip")))
 
     def _neighbours(self, server: str):
         """(server name, pair) for every pair stored on the same storage."""

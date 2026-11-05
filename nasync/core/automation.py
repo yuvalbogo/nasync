@@ -427,6 +427,11 @@ class Automator:
         owed = self._owed_pairs()
         pairs = None if None in owed else owed
         if self.sync_now("catch-up", pairs=pairs):
+            if self.changes_pending():
+                # It ran, but a pair still failed: wait before the next try.
+                # Until 0.21.1 a run that got through cleared the pause, so a
+                # pair failing every time was synced back to back, for ever.
+                self._catch_up_at = time.monotonic() + self.SCHEDULED_RETRY_SECONDS
             return True
         pause = (self.CATCH_UP_PAUSE if self.last_skip in ("busy", "away")
                  else self.SCHEDULED_RETRY_SECONDS)

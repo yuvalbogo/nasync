@@ -24,10 +24,15 @@ changed when its size differs or the local copy is newer.
   it is renamed to `name (NAS copy YYYY-MM-DD HHMM).ext` first, and kept.
 - A file **someone else put on the NAS** is never deleted. (Before a pair's
   first complete sync under the record, NASync can't tell such files apart
-  from ones it uploaded earlier — see [Bootstrap](#bootstrap).)
+  from ones it uploaded earlier — see [Bootstrap](#bootstrap).) A local file
+  that can't be read does not keep a pair in bootstrap.
+- **Conflict copies are never deleted** by a mirror, even without a record.
 - Uploads are written under a temporary name and renamed into place, so an
   interrupted upload never leaves a truncated file where the good copy was.
-  Downloads do the same on the local side.
+  Downloads do the same on the local side. If a replace is interrupted at
+  any step — even by Ctrl+C or a killed process — the complete old copy is
+  put back, or recovered by the next sync and found by restore.
+- A half-written download left by a killed restore is never uploaded.
 
 **A mistake can't wipe the backup.**
 - An **empty local folder is never mirrored** over a server folder that has
@@ -36,7 +41,11 @@ changed when its size differs or the local copy is newer.
   waits for a person. The background service holds back at **a fifth**. A
   held-back run still backs up new files; only the destructive part waits.
 - A "yes" covers exactly the deletions and overwrites that were shown (a
-  fingerprint of the list); anything found later is asked about again.
+  fingerprint of each list); anything found later is asked about again.
+- The **first mirror run** of a pair — including a server switched from update
+  to mirror — waits for a person before deleting 50 or more files.
+- Of two local names differing only in letter case, the one already on the
+  NAS is the one backed up; the other is reported, and never replaces it.
 - A local folder or file that **can't be read** is protected: nothing under it
   is deleted, and it is reported.
 - **Each pair has a server folder of its own.** Pairs whose folders are the
@@ -53,7 +62,11 @@ changed when its size differs or the local copy is newer.
 
 **My password only goes to my NAS.**
 NASync learns the NAS's identity (its SMB server GUID) on first contact and
-checks it, before sending any credentials, on every connection after.
+checks it, before sending any credentials, on every connection after. On
+Samba that identity is the server's host name — see the limitations.
+
+**Renaming a server entry changes nothing on the NAS.** The record, the
+identity, the pairs and the settings all move with the new name.
 
 **If something isn't backed up, I am told.**
 Skipped files are listed with a reason (a name SMB can't store, two names
@@ -94,22 +107,30 @@ new destination starts a new record, and the old one is pruned.
 Until a pair has completed one sync with a record, NASync can't tell a file
 someone else put on the NAS from one it uploaded with an older version. In
 that state the old rules apply — with one extra guard: deleting 50 or more
-files waits for a person, however small a share that is.
+files waits for a person, however small a share that is. In update mode the
+leftovers are recorded as NASync's, so turning mirror on later removes them
+(after the same guard).
 
 ## Accepted limitations
 
 - **Restore on a new machine doesn't bring back permissions.** An SMB share
   has nowhere to keep Unix permissions; they live in the local record, which a
   new machine doesn't have. Times and contents are restored.
-- **Server identity stops accidents, not attackers.** On Samba the GUID is
-  derived from the server's name, so a device deliberately configured to
-  imitate the NAS would pass. It reliably stops the real risk: a strange
-  network that happens to use your home's addresses.
-- **A DST hour is forgiven.** A server file whose time moved by exactly one
-  hour (±2 s) with the same size is treated as unchanged, because FAT/exFAT
-  volumes report times shifted across DST. A real edit on the NAS that keeps
-  the size and lands exactly an hour later is missed by the time check, but
-  caught by the checksum check when the record has one.
+- **Server identity stops accidents, not attackers — and on Samba it is the
+  host name.** Samba's "GUID" is its NetBIOS name padded with zeros (checked
+  against real Samba), so two Samba boxes left at the same default name
+  ("raspberrypi") look like one machine: a stranger with that name passes the
+  check (the password itself is never sent — NTLM proves it without sending
+  it). A different name is always caught. For the same reason, two entries
+  with the same Samba name count as one storage only when their addresses
+  resolve to the same machine; the same NAS reached by two *different*
+  addresses (LAN and VPN) is then not detected, and the record's "never
+  delete what NASync didn't put there" is what protects it.
+- **A DST hour is forgiven only when it moves most files at once.** FAT/exFAT
+  volumes report every time an hour off across DST; that is accepted without
+  reading the files. A single file an hour off is checked by checksum (when
+  the record has one), so a NAS-side edit made an hour after the upload is
+  kept as a conflict copy.
 - **Folder case renames stay at the old casing on the server.** The files are
   kept and matched; only the folder's letter case lags.
 - **Composed and decomposed Unicode names** (NFC/NFD) are distinct on Linux

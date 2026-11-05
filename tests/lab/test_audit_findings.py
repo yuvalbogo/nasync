@@ -115,8 +115,13 @@ def test_the_same_nas_under_two_server_entries_cannot_overlap(lab):
                                     "backup", port, root=lab.root)
     folder = os.path.join(str(lab.home), "src", "everything")
     os.makedirs(folder)
-    # Allowed at this point: nothing yet says "localhost" is the same NAS.
-    lab.config.add_pair(folder, "", "everything", server="lab-alias")
+    # "localhost" is 127.0.0.1: refused at the door, before any identity.
+    with pytest.raises(ValueError, match="overlap|contains|inside"):
+        lab.config.add_pair(folder, "", "everything", server="lab-alias")
+    # A config from before the check: the pair is already there.
+    lab.config.data["pairs_by_server"]["lab-alias"] = [
+        {"name": "everything", "local": folder, "server": ""}]
+    lab.config.save()
     from nasync.core.sync import Syncer
     # First contact teaches the alias its identity, which matches.
     Syncer(config=lab.config, server="lab-alias", reporter=lab.log.append,
