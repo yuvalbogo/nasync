@@ -33,6 +33,10 @@ changed when its size differs or the local copy is newer.
   any step — even by Ctrl+C or a killed process — the complete old copy is
   put back, or recovered by the next sync and found by restore.
 - A half-written download left by a killed restore is never uploaded.
+- A file never replaces a folder on the NAS (or the reverse) by moving it
+  aside; the clash is reported, and in mirror mode resolves on the next run.
+- After a crash right after an upload, NASync's own upload is recognised by
+  its checksum, not mistaken for a NAS edit.
 
 **A mistake can't wipe the backup.**
 - An **empty local folder is never mirrored** over a server folder that has
@@ -40,10 +44,15 @@ changed when its size differs or the local copy is newer.
 - Deleting or overwriting **more than half** of a pair's server files (50+)
   waits for a person. The background service holds back at **a fifth**. A
   held-back run still backs up new files; only the destructive part waits.
+  The share is of the files a run *could* delete — other people's files,
+  conflict copies and protected ones don't dilute it.
+- A hold nobody has answered stays a hold: the next run, whoever starts it,
+  asks before deleting 50+ — pressing Sync never waves through what the
+  background service held. The question names files, not just a count.
 - A "yes" covers exactly the deletions and overwrites that were shown (a
   fingerprint of each list); anything found later is asked about again.
-- The **first mirror run** of a pair — including a server switched from update
-  to mirror — waits for a person before deleting 50 or more files.
+- The **first mirror run** of a pair — and the first after *every* switch
+  from update to mirror — waits for a person before deleting 50 or more files.
 - Of two local names differing only in letter case, the one already on the
   NAS is the one backed up; the other is reported, and never replaces it.
 - A local folder or file that **can't be read** is protected: nothing under it
@@ -69,8 +78,11 @@ Samba that identity is the server's host name — see the limitations.
 identity, the pairs and the settings all move with the new name.
 
 **If something isn't backed up, I am told.**
-Skipped files are listed with a reason (a name SMB can't store, two names
-differing only in case, a symlinked folder, an unreadable file). Failures give
+Skipped files are listed with a reason (a name SMB can't store — including a
+backslash, a name that isn't UTF-8, a trailing dot or space, or a reserved
+Windows name like `aux.c`, which Samba would store under an 8.3 alias — two
+names differing only in case, a symlinked folder, an unreadable file). Such
+an alias already on the NAS (from an older version) is never deleted. Failures give
 a non-zero exit code. The background service notifies when a run is held back,
 when changes have waited over an hour, when a scheduled server hasn't backed up
 for three days, and when a folder can't be watched.

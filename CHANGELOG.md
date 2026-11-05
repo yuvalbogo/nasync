@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.1] - 2026-11-05
+
+The third data-safety audit (of 0.21.1): 13 findings, 12 proven against a
+real Samba server. Each is now a lab test (`tests/lab/test_third_audit.py`).
+
+### Fixed — could lose data
+- **The mass-delete guard was diluted by files it can never delete.** In a
+  folder holding your 100 photos and someone else's 400, 99 of yours went in
+  one run. The share is now of files NASync could delete.
+- **Switching update → mirror asked nothing if the pair had ever mirrored.**
+  Every switch to update now makes the next mirror run a "first" one.
+- **One file the NAS can't store kept a pair in bootstrap for ever**, where
+  mirror deletes other people's files. Errors no longer keep it there: a file
+  a run misses is one NASync keeps, never one it deletes.
+- **Renaming a server only in letter case wiped its record.**
+- **Removing a server with a locked keyring** dropped its record but kept the
+  server, and left it half-removed in memory for the next save. A change that
+  fails now leaves nothing changed.
+- **A restored file of someone else's became NASync's own**, so deleting it
+  locally deleted the only copy on the NAS.
+- **A backslash in a name** (`a\b.txt`) landed on `a/b.txt` and replaced that
+  file's backup.
+- **A server file whose folder became a file** was renamed to a hidden name.
+- **A run the service held back went through on any manual Sync**, unasked.
+
+### Fixed — wrong or stuck
+- **Edits failed with "Access denied" whenever a new file was uploaded first
+  in the run** — on Samba, every day for anyone whose new files sort first.
+- **Reserved Windows names and trailing dots** (`aux.c`, `con`, `notes.`)
+  were stored under 8.3 aliases, re-sent on every run and restored under the
+  wrong name. They are skipped and reported; an alias already there is kept.
+- **Names that aren't UTF-8** failed on every run. Skipped and reported.
+- **A crash right after an upload** made NASync's own upload look like a NAS
+  edit, leaving "NAS copy" files behind.
+- A folder that became a file (or the reverse) failed the whole pair.
+
+### Added
+- `nasync sync --server` and `nasync restore --server`: scripts and cron jobs
+  should name their server, since switching tabs in the app changes the
+  active one.
+- The held-back question (app and CLI) shows the first files by name; the
+  app's has a Preview button.
+
 ## [0.22.0] - 2026-11-05
 
 The desktop app says what is happening, folder by folder.

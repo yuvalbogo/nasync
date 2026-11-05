@@ -35,7 +35,7 @@ class _RecordingClient:
 
     def sync_directory(self, local_dir, remote_dir, direction="push",
                        dry_run=False, mirror=True, allow_mass_delete=False,
-                       state=None, unattended=False):
+                       state=None, unattended=False, outstanding=False):
         _RecordingClient.calls.append({"direction": direction, "mirror": mirror})
         _RecordingClient.allowed.append(allow_mass_delete)
         return {"transferred": 0, "skipped": 0, "deleted": 0, "errors": 0,
@@ -231,7 +231,7 @@ def test_a_refused_pair_is_reported_for_someone_to_confirm():
     assert result["failed"] == 1 and result["ok"] == 0, result
     assert result["refused"] == [{"pair": "pair", "message": "would delete 900 of 1000",
                                   "deletes": 900, "total": 1000,
-                                  "confirmable": True, "fingerprint": ""}], result
+                                  "confirmable": True, "fingerprint": "", "sample": []}], result
 
 
 def test_a_sync_refuses_to_start_while_another_process_holds_the_lock():

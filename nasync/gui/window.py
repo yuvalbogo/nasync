@@ -1501,8 +1501,11 @@ class NasyncWindow(Adw.ApplicationWindow):
             if r.get("hold_overwrites") or (not r.get("deletes") and r.get("overwrites")):
                 parts.append(f"replace {r['overwrites']:,}")
             return " and ".join(parts) or "change"
-        lines = [f"• '{r['pair']}' would {what(r)} of {r['total']:,} file(s) "
-                 f"in its server folder." for r in held]
+        lines = []
+        for r in held:
+            lines.append(f"• '{r['pair']}' would {what(r)} of {r['total']:,} file(s) "
+                         f"in its server folder, including:")
+            lines.extend(f"    {name}" for name in r.get("sample", [])[:6])
         deleting = any(r.get("hold_deletes", True) and r.get("deletes") for r in held)
         replacing = any(r.get("hold_overwrites") for r in held)
         verb = ("Delete and Replace" if deleting and replacing
@@ -1513,16 +1516,25 @@ class NasyncWindow(Adw.ApplicationWindow):
                  "yet, and new files were backed up. This usually means a folder "
                  "moved, a disk didn't mount, or a pair points somewhere "
                  "unexpected — or, for replaced files, that something rewrote "
-                 "them all. Preview Sync lists every file first.")
+                 "them all. Preview lists every file.")
         dialog.add_response("keep", "Keep Them")
+        dialog.add_response("preview", "Preview")
         dialog.add_response("delete", verb)
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("keep")
         dialog.set_close_response("keep")
         answer = {r["pair"]: r.get("fingerprint") for r in held}
-        dialog.connect("response", lambda _d, response: (
-            self.start_transfer("push", False, confirmed=answer)
-            if response == "delete" else None))
+        server = self.config.get_active_server_name()
+
+        def answered(_dialog, response):
+            if response == "delete":
+                self.start_transfer("push", False, confirmed=answer)
+            elif response == "preview":
+                pairs = list(answer)
+                # One pair previews alone; several, the whole server.
+                self.start_transfer("push", True, server=server,
+                                    pair=pairs[0] if len(pairs) == 1 else None)
+        dialog.connect("response", answered)
         dialog.present(self)
 
     # ------------------------------------------------------------------ #

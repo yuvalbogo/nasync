@@ -70,7 +70,17 @@ CHUNK_SIZE = 1024 * 1024
 # letting the server reject things: Samba silently truncates "note:x.txt" to
 # "note" and diverts the contents into an NTFS alternate data stream, so the
 # file appears to sync while its data is quietly lost.
-_ILLEGAL_CHARS = set('<>:"|?*') | {chr(c) for c in range(32)}
+_ILLEGAL_CHARS = set('<>:"|?*\\') | {chr(c) for c in range(32)}
+
+# Names Samba accepts but stores under an 8.3 alias ("AHY9U3~9.C" for "aux.c")
+# with its default `mangled names` setting: Windows' reserved device names,
+# with any extension, and names ending in a dot or a space. Uploaded, they
+# came back under the alias — re-sent on every run, restored under the wrong
+# name, and deleted as "someone else's" by a mirror run.
+_RESERVED_NAMES = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} \
+    | {f"lpt{i}" for i in range(1, 10)}
+# What such an alias looks like in a listing: never deleted, never adopted.
+_MANGLED_RE = re.compile(r"^[A-Z0-9_$]{1,6}~[A-Z0-9]{1,2}(\.[A-Z0-9_]{1,3})?$")
 
 #: How far apart two modification times may be and still count as the same.
 #: Some NAS volumes (FAT, exFAT) store times in 2-second steps, so an exact
@@ -112,8 +122,11 @@ class MirrorRefused(Exception):
 
     def __init__(self, message: str, deletes: int, total: int,
                  confirmable: bool, fingerprint: str = "", overwrites: int = 0,
-                 hold_deletes: bool = True, hold_overwrites: bool = False):
+                 hold_deletes: bool = True, hold_overwrites: bool = False,
+                 sample: list = ()):
         super().__init__(message)
+        #: A few of the files held, so whoever is asked sees names, not a count.
+        self.sample = list(sample)
         self.deletes = deletes
         self.total = total
         self.confirmable = confirmable
@@ -245,7 +258,26 @@ class SAMBAClient:
         characters fail loudly (STATUS_OBJECT_NAME_INVALID) while ':' fails
         *silently* by truncating the name and losing the file's contents.
         """
-        return not any(ch in _ILLEGAL_CHARS for part in rel.split("/") for ch in part)
+        return SAMBAClient._unstorable(rel) is None
+
+    @staticmethod
+    def _unstorable(rel: str):
+        """Why `rel` can't be stored on the NAS under its own name, or None.
+
+        A backslash is a path separator on SMB: "a\\b.txt" landed on "a/b.txt"
+        and replaced that file's backup. A name that isn't UTF-8 (from an old
+        archive) fails on every run. Neither is an error to retry.
+        """
+        for part in rel.split("/"):
+            if any(ch in _ILLEGAL_CHARS for ch in part):
+                return "name not allowed on SMB"
+            if any("\udc80" <= ch <= "\udcff" for ch in part):
+                return "name isn't valid UTF-8, so the NAS can't store it"
+            if part.endswith((".", " ")):
+                return "name ends in a dot or a space, which the NAS would change"
+            if part.split(".", 1)[0].casefold() in _RESERVED_NAMES:
+                return "a reserved Windows name, which the NAS would change"
+        return None
 
     # ------------------------------------------------------------------ #
     # Errors
@@ -918,8 +950,9 @@ class SAMBAClient:
                 rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        if not self._storable(rel):
-                            unsupported.append((rel, "name not allowed on SMB"))
+                        why = self._unstorable(rel)
+                        if why:
+                            unsupported.append((rel, why))
                             continue
                         dirs.add(rel)
                         pending.append((entry.path, rel))
@@ -933,8 +966,9 @@ class SAMBAClient:
                             continue
                     elif not entry.is_file():
                         continue         # sockets, fifos, devices: not data
-                    if not self._storable(rel):
-                        unsupported.append((rel, "name not allowed on SMB"))
+                    why = self._unstorable(rel)
+                    if why:
+                        unsupported.append((rel, why))
                         continue
                     if _is_own_temp(rel):
                         # A download a killed restore left half-written: never
@@ -1036,20 +1070,25 @@ class SAMBAClient:
         per session, so a server that refuses costs one wasted call, not one
         per file.
         """
+        try:
+            smbclient.rename(temp, final, **self._opts)      # nothing there yet
+            return
+        except Exception:
+            pass
+        # Something is there. Learned only from a replace onto an existing
+        # file: one onto a free name succeeds anywhere, and learning from that
+        # made every later edit in the run fail with "Access denied" on Samba
+        # (third audit, #3). A refused replace always falls back.
         if self._replace_works is not False:
             try:
                 smbclient.replace(temp, final, **self._opts)
                 self._replace_works = True
                 return
             except Exception:
-                if self._replace_works:
-                    raise
                 self._replace_works = False
-        try:
-            smbclient.rename(temp, final, **self._opts)      # nothing there yet
-            return
-        except Exception:
-            pass
+        if S_ISDIR(smbclient.stat(final, **self._opts).st_mode):
+            # Moving it aside would hide a whole folder under a temp name.
+            raise OSError("a folder of this name is on the NAS")
         folder, _, base = final.rpartition("\\")
         aside = f"{folder}\\{_temp_name(base, _OLD_MARK)}"
         smbclient.rename(final, aside, **self._opts)
@@ -1210,11 +1249,13 @@ class SAMBAClient:
     def sync_directory(self, local_dir: str, remote_dir: str,
                        direction: str = "push", dry_run: bool = False,
                        mirror: bool = True, allow_mass_delete=False,
-                       state=None, unattended: bool = False) -> dict:
+                       state=None, unattended: bool = False,
+                       outstanding: bool = False) -> dict:
         """Push or pull one pair. `state` is its :class:`~nasync.core.state.SyncState`."""
         if direction == "push":
             return self._push_directory(local_dir, remote_dir, dry_run, mirror,
-                                        allow_mass_delete, state, unattended)
+                                        allow_mass_delete, state, unattended,
+                                        outstanding)
         elif direction == "pull":
             return self._pull_directory(local_dir, remote_dir, dry_run, state)
         raise ValueError(f"Unknown direction: {direction}")
@@ -1307,6 +1348,17 @@ class SAMBAClient:
                 return remote_hash(remote_rel) != rec.sha256
             return True
 
+        def same_as_local(rel, remote_rel):
+            """The local file's checksum, when the server copy has the same bytes."""
+            _, size, mtime = local_map[rel]
+            rtime = remote_mtimes.get(remote_rel)
+            if (remote_map[remote_rel] != size or rtime is None
+                    or abs(rtime - mtime) > MTIME_SLACK
+                    or local_hash is None or remote_hash is None):
+                return None
+            digest = local_hash(rel)
+            return digest if digest and digest == remote_hash(remote_rel) else None
+
         by_fold = {}
         for remote_rel in remote_map:
             by_fold.setdefault(remote_rel.casefold(), []).append(remote_rel)
@@ -1343,6 +1395,14 @@ class SAMBAClient:
                     local_changed = False            # touched, not edited
                     learn[remote_rel] = rec._replace(mtime=mtime)
                 if changed_on_server(remote_rel, rec):
+                    digest = same_as_local(rel, remote_rel)
+                    if digest:
+                        # NASync's own upload, whose record a crash didn't
+                        # commit — not someone's edit (third audit, #13).
+                        learn[remote_rel] = _entry(size, mtime, rsize, rtime, digest,
+                                                   rec.mode)
+                        unchanged.append(rel)
+                        continue
                     conflicts.append(remote_rel)
                     set_aside.add(rel)
                     upload.append((rel, rel))
@@ -1374,11 +1434,13 @@ class SAMBAClient:
                 upload.append((rel, target))
                 continue
             unchanged.append(rel)
-            if rtime is not None and abs(rtime - mtime) > MTIME_SLACK:
+            theirs = rec is not None and rec.kept
+            if rtime is not None and abs(rtime - mtime) > MTIME_SLACK and not theirs:
                 stamps.append((target, mtime))
             learn[target] = _entry(size, mtime, rsize,
                                    mtime if rtime is None or abs(rtime - mtime)
-                                   <= MTIME_SLACK else None)
+                                   <= MTIME_SLACK else rtime if theirs else None,
+                                   kept=theirs)
 
         temps, delete, foreign, kept = [], [], [], []
         for remote_rel in sorted(remote_map):
@@ -1390,7 +1452,8 @@ class SAMBAClient:
             if _under(remote_rel, protected) or remote_rel in shielded:
                 continue                 # its local side couldn't be read
             rec = record.get(remote_rel)
-            if rec is not None and rec.kept or _is_conflict_copy(remote_rel):
+            if rec is not None and rec.kept or _is_conflict_copy(remote_rel) \
+                    or _is_mangled(remote_rel):
                 continue
             if rec is not None:
                 if changed_on_server(remote_rel, rec):
@@ -1483,16 +1546,29 @@ class SAMBAClient:
         overwrites = [rel for rel, _ in upload
                       if rel in matched and rel not in set_aside]
 
+        # The guard's yardstick: server files a run *could* delete or replace.
+        # Other people's files, conflict copies and protected ones can't be,
+        # and counting them let 99 of your 100 photos go in a folder that also
+        # held 400 of someone else's (third audit, #1).
+        def could_go(remote_rel):
+            if (_is_own_temp(remote_rel) or _under(remote_rel, protected)
+                    or remote_rel in shielded or _is_conflict_copy(remote_rel)
+                    or _is_mangled(remote_rel)):
+                return False
+            rec = record.get(remote_rel)
+            return (not rec.kept) if rec is not None else bootstrap
+        eligible = sum(1 for remote_rel in remote_map if could_go(remote_rel))
+
         return {"upload": upload, "unchanged": unchanged, "delete": delete,
                 "renames": renames, "moves": sorted(moves), "stamps": stamps,
                 "stale": stale, "conflicts": conflicts, "foreign": foreign,
                 "kept": kept, "learn": learn, "forget": forget, "temps": temps,
-                "mkdirs": mkdirs, "overwrites": overwrites}
+                "mkdirs": mkdirs, "overwrites": overwrites, "eligible": eligible}
 
     @staticmethod
     def check_mirror(plan: dict, local_count: int, remote_count: int,
                      allow_mass_delete=False, unattended: bool = False,
-                     bootstrap: bool = False) -> None:
+                     bootstrap: bool = False, outstanding: bool = False) -> None:
         """Refuse the part of a run that looks like a mistake.
 
         Raises :class:`MirrorRefused`, before anything has been touched, when:
@@ -1510,6 +1586,12 @@ class SAMBAClient:
           would delete `MASS_DELETE_MIN` or more: the record can't yet tell
           files the user deleted from files someone else put there, and a
           server switched from update to mirror deletes years of leftovers.
+
+        Shares are of the files a run could delete (``plan["eligible"]``), not
+        of everything in the folder. And a hold the background service made
+        and nobody has answered (`outstanding`) is asked about by the next
+        run a person starts, whatever its share — until 0.22.1 pressing Sync
+        waved a 30% delete the service had held straight through.
 
         `allow_mass_delete` is a person's yes: ``True`` for any amount (the
         CLI's explicit flag), or the `fingerprint` of the refusal they saw.
@@ -1535,11 +1617,12 @@ class SAMBAClient:
             return
         approved = set(str(allow_mass_delete).split(":")) if allow_mass_delete else set()
         share = UNATTENDED_FRACTION if unattended else MASS_DELETE_FRACTION
+        yardstick = plan.get("eligible", remote_count)
         big_delete = deletes >= MASS_DELETE_MIN and (
-            deletes > share * remote_count or bootstrap) \
+            deletes > share * yardstick or bootstrap or outstanding) \
             and held_deletes not in approved
         big_overwrite = overwrites >= MASS_DELETE_MIN and \
-            overwrites > share * remote_count and held_overwrites not in approved
+            overwrites > share * yardstick and held_overwrites not in approved
         if not (big_delete or big_overwrite):
             return
         fingerprint = ":".join(([held_deletes] if big_delete else [])
@@ -1559,12 +1642,15 @@ class SAMBAClient:
             f"ahead.",
             deletes, remote_count, confirmable=True, fingerprint=fingerprint,
             overwrites=overwrites, hold_deletes=big_delete,
-            hold_overwrites=big_overwrite)
+            hold_overwrites=big_overwrite,
+            sample=([f"✗ {r}" for r in sorted(plan["delete"])[:10]] if big_delete else [])
+            + ([f"↻ {r}" for r in sorted(plan.get("overwrites", ()))[:10]]
+               if big_overwrite else []))
 
     def _push_directory(self, local_dir: str, remote_dir: str,
                         dry_run: bool = False, mirror: bool = True,
                         allow_mass_delete=False, state=None,
-                        unattended: bool = False) -> dict:
+                        unattended: bool = False, outstanding: bool = False) -> dict:
         local_dir = os.path.abspath(os.path.expanduser(local_dir))
         if not os.path.isdir(local_dir):
             raise Exception(f"Local directory not found: {local_dir}")
@@ -1619,7 +1705,7 @@ class SAMBAClient:
         try:
             self.check_mirror(plan, len(local_map), len(remote_map),
                               allow_mass_delete, unattended=unattended,
-                              bootstrap=first_mirror)
+                              bootstrap=first_mirror, outstanding=outstanding)
         except MirrorRefused as e:
             refusal = e
         if refusal is not None and not dry_run:
@@ -1754,6 +1840,53 @@ class SAMBAClient:
                     plan["learn"][old] = plan["learn"].pop(new)
 
         # --- 6. directories, then moves and uploads ---
+        # A file and a folder of the same name, one on each side. In mirror
+        # mode the old one goes when the deletes run, and the new one follows
+        # next sync; until then only its own path waits — not the whole pair
+        # (a failed mkdir used to abort it), and no folder is ever moved.
+        remote_dirs_folded = {d.casefold() for d in remote_dirs}
+        remote_files_folded = {r.casefold(): r for r in remote_map}
+        doomed = {r.casefold() for r in delete}
+
+        def blocked(target):
+            if target.casefold() in remote_dirs_folded:
+                return "the NAS has a folder of this name"
+            parts = target.split("/")[:-1]
+            for depth in range(1, len(parts) + 1):
+                folder = "/".join(parts[:depth]).casefold()
+                if folder in remote_files_folded:
+                    if folder in doomed:
+                        return None          # deleted below, before its folder is made
+                    return "the NAS has a file where this folder would go"
+            return None
+
+        early, deleted_early = [], 0
+        for rel, target in list(upload):
+            why = blocked(target)
+            if why:
+                upload.remove((rel, target))
+                errors.append(f"{rel}: {why} — "
+                              + ("it goes when this sync's deletions run; the "
+                                 "file follows next sync" if mirror else
+                                 "remove or rename one of them"))
+                continue
+            for depth in range(1, target.count("/") + 1):
+                folder = "/".join(target.split("/")[:depth]).casefold()
+                if folder in remote_files_folded and folder in doomed:
+                    early.append(remote_files_folded[folder])
+        for rel in sorted(set(early)):
+            # A file standing where a new folder goes is deleted first.
+            try:
+                smbclient.remove(unc(rel), **self._opts)
+                delete.remove(rel)
+                deleted_early += 1
+                if state is not None:
+                    state.forget(rel)
+                remote_files_folded.pop(rel.casefold(), None)
+            except SyncCancelled:
+                raise
+            except Exception as e:
+                errors.append(f"{rel}: {self._friendly_error(e)}")
         # One makedirs per *directory* rather than per file: a thousand photos
         # in one album used to cost a thousand identical mkdir round trips.
         self._ensure_remote_dir(self._unc(base))
@@ -1761,7 +1894,13 @@ class SAMBAClient:
         parents |= {new.rsplit("/", 1)[0] for _, new in moves if "/" in new}
         parents |= set(plan["mkdirs"])
         for parent in self._leaf_dirs(parents):
-            self._ensure_remote_dir(self._unc(base, parent.replace("/", "\\")))
+            try:
+                self._ensure_remote_dir(self._unc(base, parent.replace("/", "\\")))
+            except SyncCancelled:
+                raise
+            except Exception as e:
+                errors.append(f"{parent}/: {e}")
+                upload = [u for u in upload if not u[1].startswith(parent + "/")]
 
         moved = 0
         for index, (old, new) in enumerate(moves, start=1):
@@ -1841,7 +1980,7 @@ class SAMBAClient:
             record_put(rel, entry)
 
         # --- 8. mirror deletes ---
-        deleted = 0
+        deleted = deleted_early
         for index, rel in enumerate(delete, start=1):
             self._check_cancelled()
             self._progress(index, len(delete), rel.rsplit("/", 1)[-1], "Deleting")
@@ -1900,7 +2039,8 @@ class SAMBAClient:
                     "confirmable": refusal.confirmable,
                     "fingerprint": refusal.fingerprint,
                     "hold_deletes": refusal.hold_deletes,
-                    "hold_overwrites": refusal.hold_overwrites}
+                    "hold_overwrites": refusal.hold_overwrites,
+                    "sample": refusal.sample}
         return {"transferred": transferred, "skipped": len(plan["unchanged"]),
                 "deleted": deleted, "deleted_dirs": removed_dirs,
                 "moved": moved, "errors": len(errors),
@@ -2160,6 +2300,11 @@ def _is_conflict_copy(rel: str) -> bool:
     mirror never deletes it — even with no record (one lost to a renamed
     server entry, say)."""
     return bool(_CONFLICT_RE.search(rel.rsplit("/", 1)[-1]))
+
+
+def _is_mangled(rel: str) -> bool:
+    """An 8.3 alias Samba listed for a name it couldn't store as given."""
+    return bool(_MANGLED_RE.match(rel.rsplit("/", 1)[-1]))
 
 
 def _list_digest(items) -> str:
