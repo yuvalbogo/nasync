@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.4] - 2026-11-06
+
+### Documentation
+- **App icon does nothing, but searching for NASync works**: the README now
+  explains this (GNOME keeps a stale grid icon after the launcher changes) and
+  the fix: move the icon out of its folder and back, or log out and in.
+
 ## [0.22.3] - 2026-11-05
 
 ### Fixed
