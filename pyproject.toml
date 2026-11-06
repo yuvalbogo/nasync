@@ -57,7 +57,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/YuvalBogo/nasync"
-Documentation = "https://github.com/YuvalBogo/nasync/blob/main/README.md"
+Documentation = "https://github.com/YuvalBogo/nasync/tree/main/docs"
 Repository = "https://github.com/YuvalBogo/nasync.git"
 Issues = "https://github.com/YuvalBogo/nasync/issues"
 
