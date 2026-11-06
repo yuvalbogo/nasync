@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.22.5] - 2026-11-06
+
+### Documentation
+- **The docs moved into `docs/`**, one page per topic: installation, getting
+  started, how syncing works, automatic syncing, the desktop app, security,
+  server tools, a command reference, troubleshooting, data safety and
+  architecture. The README is now a short overview that links to them.
+- `QUICKSTART.md` became `docs/getting-started.md`, `DATA_SAFETY.md` became
+  `docs/data-safety.md`, and the screenshots moved to `docs/screenshots/`.
+- `CONTRIBUTING.md` moved to the repository root and was rewritten: it said
+  to install `samba-client` and run a test module that no longer exists.
+- Corrected pages that still described pair paths as relative to the share
+  rather than the sync root, and settings in an "Automatic" popover that the
+  app no longer has.
+- Removed the old bug list (`BUGS NEEDS TO FIX 1 notifications.txt`); every
+  item in it was fixed by 0.22.3.
+
 ## [0.22.4] - 2026-11-06
 
 ### Documentation
