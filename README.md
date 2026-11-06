@@ -654,6 +654,14 @@ saying why and how to fix it, instead of nothing. The output of the last launch
 is in `~/.local/state/nasync/gui.log`. `nasync status` reports the same, and
 opening the app any other way repairs the launcher.
 
+If NASync opens when you search for it and press Enter, but clicking its icon
+in the app grid does nothing (no window, no notification), GNOME is holding a
+stale copy of that icon from before the launcher last changed. Search looks the
+app up afresh; a grid icon keeps what it had when it was drawn. Drag the icon
+out of its folder and back, or log out and in, and GNOME redraws it. Installs
+made with `make install-user` keep the launcher's contents fixed, so after
+updating to one of them this shouldn't recur.
+
 This installs a standard freedesktop `.desktop` entry and an icon under
 `~/.local/share` (nothing system-wide, no root needed). Both are named after
 the application ID, `io.github.YuvalBogo.NASync`, which is what lets GNOME
