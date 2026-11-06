@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the images in `screenshots/`.
+"""Regenerate the images in `docs/screenshots/`.
 
 The README and (eventually) the Flathub appstream metadata both need pictures
 of NASync that look like a real session, not an empty first-run window. Taking
@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-OUT = REPO / "screenshots"
+OUT = REPO / "docs" / "screenshots"
 NASYNC = REPO / ".venv" / "bin" / "nasync"
 
 # A plausible home-NAS setup: two servers so the server tabs have something to
@@ -128,7 +128,7 @@ def shoot_cli(env) -> None:
         console.print(Text.from_ansi(f"$ nasync {' '.join(argv)}\n"))
         console.print(Text.from_ansi(body))
         console.save_svg(str(OUT / filename), title=title)
-        print(f"wrote screenshots/{filename}")
+        print(f"wrote docs/screenshots/{filename}")
 
 
 # --------------------------------------------------------------------- #

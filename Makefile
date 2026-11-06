@@ -31,7 +31,7 @@ test:
 
 # The data-safety lab: NASync against a throwaway Samba container. Run it
 # before every release and after any change to how files are compared,
-# copied, renamed or deleted. See DATA_SAFETY.md.
+# copied, renamed or deleted. See docs/data-safety.md.
 lab:
 	python -m pytest tests/lab --lab -v
 

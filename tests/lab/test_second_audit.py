@@ -442,7 +442,7 @@ def test_g4_two_nases_with_the_same_hostname(lab):
             "two different NASes treated as one"
         assert add == "added", add
         # Samba's identity is its host name, so a stranger *with the same
-        # name* can't be told apart (documented in DATA_SAFETY.md). One with
+        # name* can't be told apart (documented in docs/data-safety.md). One with
         # another name must still be refused before any password is sent.
         assert not outcome.startswith("ServerIdentityChanged"), outcome
         other, other_port = _container(engine, "not-my-nas", "alice", "homepw")
